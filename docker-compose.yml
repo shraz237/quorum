@@ -25,6 +25,23 @@ services:
       timeout: 5s
       retries: 5
 
+  data-collector:
+    build:
+      context: .
+      dockerfile: services/data-collector/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   sentiment:
     build:
       context: .
@@ -36,6 +53,11 @@ services:
         condition: service_healthy
     env_file: .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   analyzer:
     build:
@@ -48,6 +70,28 @@ services:
         condition: service_healthy
     env_file: .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ai-brain:
+    build:
+      context: .
+      dockerfile: services/ai-brain/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   notifier:
     build:
@@ -58,6 +102,11 @@ services:
         condition: service_healthy
     env_file: .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   dashboard:
     build:
@@ -72,6 +121,11 @@ services:
         condition: service_healthy
     env_file: .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres_data:

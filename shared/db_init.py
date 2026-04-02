@@ -84,6 +84,109 @@ def init_db() -> None:
                 logger.warning("Compression policy for %s skipped: %s", table, exc)
                 conn.rollback()
 
+    with engine.connect() as conn:
+        # ------------------------------------------------------------------
+        # Continuous aggregates
+        # ------------------------------------------------------------------
+
+        # Daily OHLCV rollup from 1-minute bars.
+        logger.info("Creating continuous aggregate: ohlcv_daily …")
+        try:
+            conn.execute(
+                text(
+                    """
+                    CREATE MATERIALIZED VIEW IF NOT EXISTS ohlcv_daily
+                    WITH (timescaledb.continuous) AS
+                    SELECT
+                        time_bucket('1 day', timestamp) AS bucket,
+                        source,
+                        first(open, timestamp)           AS open,
+                        max(high)                        AS high,
+                        min(low)                         AS low,
+                        last(close, timestamp)           AS close,
+                        sum(volume)                      AS volume
+                    FROM ohlcv
+                    WHERE timeframe = '1min'
+                    GROUP BY bucket, source
+                    WITH NO DATA;
+                    """
+                )
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.warning("ohlcv_daily aggregate skipped: %s", exc)
+            conn.rollback()
+
+        # Hourly analysis scores rollup.
+        logger.info("Creating continuous aggregate: scores_hourly …")
+        try:
+            conn.execute(
+                text(
+                    """
+                    CREATE MATERIALIZED VIEW IF NOT EXISTS scores_hourly
+                    WITH (timescaledb.continuous) AS
+                    SELECT
+                        time_bucket('1 hour', timestamp) AS bucket,
+                        avg(technical_score)             AS technical_score,
+                        avg(fundamental_score)           AS fundamental_score,
+                        avg(sentiment_score)             AS sentiment_score,
+                        avg(shipping_score)              AS shipping_score,
+                        avg(unified_score)               AS unified_score
+                    FROM analysis_scores
+                    GROUP BY bucket
+                    WITH NO DATA;
+                    """
+                )
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.warning("scores_hourly aggregate skipped: %s", exc)
+            conn.rollback()
+
+        # ------------------------------------------------------------------
+        # Refresh policies for continuous aggregates
+        # ------------------------------------------------------------------
+
+        logger.info("Adding refresh policy for ohlcv_daily …")
+        try:
+            conn.execute(
+                text(
+                    """
+                    SELECT add_continuous_aggregate_policy(
+                        'ohlcv_daily',
+                        start_offset  => INTERVAL '3 days',
+                        end_offset    => INTERVAL '1 hour',
+                        schedule_interval => INTERVAL '1 hour',
+                        if_not_exists => TRUE
+                    );
+                    """
+                )
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.warning("ohlcv_daily refresh policy skipped: %s", exc)
+            conn.rollback()
+
+        logger.info("Adding refresh policy for scores_hourly …")
+        try:
+            conn.execute(
+                text(
+                    """
+                    SELECT add_continuous_aggregate_policy(
+                        'scores_hourly',
+                        start_offset  => INTERVAL '3 days',
+                        end_offset    => INTERVAL '1 hour',
+                        schedule_interval => INTERVAL '1 hour',
+                        if_not_exists => TRUE
+                    );
+                    """
+                )
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.warning("scores_hourly refresh policy skipped: %s", exc)
+            conn.rollback()
+
     logger.info("Database initialisation complete.")
 
 
