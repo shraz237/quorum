@@ -2,30 +2,32 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
+
 # ---------------------------------------------------------------------------
-# We import parse_grok_response directly — no network or DB calls needed.
+# Import helper — reload module cleanly each time
 # ---------------------------------------------------------------------------
 
 
 def _import_parse():
-    """Import parse_grok_response, reloading the module to avoid cache issues."""
-    import sys
-    mod_name = "services.sentiment.sources.twitter"
-    if mod_name in sys.modules:
-        # Use cached version — it's a pure function, no side effects on import
-        pass
-    from services.sentiment.sources.twitter import parse_grok_response  # type: ignore[import]
+    """Return parse_grok_response from sources.twitter (cached after first load)."""
+    mod_name = "sources.twitter"
+    if mod_name not in sys.modules:
+        pass  # will be imported fresh below
+    from sources.twitter import parse_grok_response  # type: ignore[import]
     return parse_grok_response
 
 
-class TestParseGrokResponse:
-    """Unit tests for parse_grok_response()."""
+# ---------------------------------------------------------------------------
+# Tests for parse_grok_response
+# ---------------------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Happy-path: valid JSON with all fields
-    # ------------------------------------------------------------------
+
+class TestParseGrokResponse:
+    """Unit tests for parse_grok_response() — no network or DB calls."""
 
     def test_bullish_response(self):
         parse = _import_parse()
@@ -54,10 +56,6 @@ class TestParseGrokResponse:
         assert result["score"] == pytest.approx(0.0)
         assert "OPEC" in result["narrative"]
 
-    # ------------------------------------------------------------------
-    # Topics as comma-joined string
-    # ------------------------------------------------------------------
-
     def test_topics_joined_as_string(self):
         parse = _import_parse()
         text = '{"score": 0.2, "narrative": "Mild optimism", "topics": ["#Oil", "#Brent", "supply"]}'
@@ -68,20 +66,12 @@ class TestParseGrokResponse:
         assert "#Brent" in result["topics"]
         assert "supply" in result["topics"]
 
-    # ------------------------------------------------------------------
-    # Edge case: topics is an empty list
-    # ------------------------------------------------------------------
-
     def test_empty_topics_list(self):
         parse = _import_parse()
         text = '{"score": 0.1, "narrative": "Quiet day", "topics": []}'
         result = parse(text)
 
         assert result["topics"] == ""
-
-    # ------------------------------------------------------------------
-    # Edge case: markdown code fence wrapping
-    # ------------------------------------------------------------------
 
     def test_markdown_code_fence(self):
         parse = _import_parse()
@@ -90,10 +80,6 @@ class TestParseGrokResponse:
 
         assert result["score"] == pytest.approx(0.4)
         assert result["narrative"] == "Bulls dominate"
-
-    # ------------------------------------------------------------------
-    # Edge case: missing keys → sensible defaults
-    # ------------------------------------------------------------------
 
     def test_missing_score_defaults_to_zero(self):
         parse = _import_parse()
@@ -109,30 +95,17 @@ class TestParseGrokResponse:
 
         assert result["narrative"] == "unknown"
 
-    # ------------------------------------------------------------------
-    # Edge case: invalid JSON → fallback
-    # ------------------------------------------------------------------
-
     def test_invalid_json_returns_fallback(self):
         parse = _import_parse()
         result = parse("this is not json at all")
 
         assert result == {"score": 0.0, "narrative": "parse error", "topics": ""}
 
-    # ------------------------------------------------------------------
-    # Edge case: empty string → fallback
-    # ------------------------------------------------------------------
-
     def test_empty_string_returns_fallback(self):
         parse = _import_parse()
         result = parse("")
 
         assert result == {"score": 0.0, "narrative": "parse error", "topics": ""}
-
-    # ------------------------------------------------------------------
-    # Score clamping not enforced by parser (Grok should be trusted),
-    # but verify float conversion works for boundary values
-    # ------------------------------------------------------------------
 
     def test_score_boundary_positive_one(self):
         parse = _import_parse()
