@@ -1,0 +1,4 @@
+pandas>=2.2
+pandas-ta>=0.3
+numpy>=1.26
+shared @ file:///app/shared

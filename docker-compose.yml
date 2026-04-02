@@ -37,5 +37,17 @@ services:
     env_file: .env
     restart: unless-stopped
 
+  analyzer:
+    build:
+      context: .
+      dockerfile: services/analyzer/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    restart: unless-stopped
+
 volumes:
   postgres_data:
