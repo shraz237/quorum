@@ -1,12 +1,14 @@
 """Telegram @marketfeed channel scraper.
 
 Scrapes the public web preview at https://t.me/s/marketfeed (no auth needed),
-filters messages for crude-oil relevance, and uses Claude Haiku to score each
-relevant message into the SentimentNews table.
+filters messages for crude-oil relevance, and uses a single Claude Haiku call
+to BOTH classify each relevant message AND produce a rolling 5-minute digest.
 
 @marketfeed posts breaking financial / geopolitical news that moves oil:
 OPEC decisions, Iran/Israel/Hormuz events, US inventory surprises, sanctions,
 ceasefires, drone strikes on energy infrastructure, etc.
+
+Wave 2 optimisation: 1 Haiku call per scrape cycle instead of N+1.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from sqlalchemy import select
 
 from shared.config import settings
 from shared.models.base import SessionLocal
+from shared.models.knowledge import KnowledgeSummary
 from shared.models.sentiment import SentimentNews
 from shared.redis_streams import publish
 from shared.schemas.events import SentimentEvent
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 _CHANNEL_URL = "https://t.me/s/marketfeed"
 _SOURCE_NAME = "telegram_marketfeed"
 _STREAM = "sentiment.news"
+_KNOWLEDGE_STREAM = "knowledge.summary"
 
 # Keywords that gate which messages we send to Haiku for scoring. Pre-filtering
 # saves Anthropic tokens — most @marketfeed posts are not oil-related.
@@ -46,6 +50,7 @@ _OIL_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Per-message fallback prompt (used only when batch call fails)
 _CLASSIFY_PROMPT = """You are an oil-market analyst. Classify the following breaking-news headline for its impact on Brent crude oil prices.
 
 HEADLINE:
@@ -59,6 +64,28 @@ Respond with ONLY a JSON object (no markdown, no extra text) with these exact ke
 
 Be strict with relevance: only score 0.7+ if the news directly affects oil supply/demand/risk premium."""
 
+# Combined classify + digest prompt (1 Haiku call does both)
+_COMBINED_PROMPT = """You are an oil-market analyst. Analyze these {n} breaking-news headlines from Telegram @marketfeed.
+
+Headlines (numbered, last 5 minutes, newest first):
+{numbered_headlines}
+
+Return a JSON object with EXACTLY these keys (no markdown, no extra text):
+{{
+  "items": [
+    {{"i": 0, "sentiment": "bullish"|"bearish"|"neutral", "score": <-1..1>, "relevance": <0..1>, "reason": "<short>"}},
+    ... (one per headline, in order)
+  ],
+  "digest": {{
+    "summary": "2-3 sentence digest of what just happened in the oil market",
+    "key_events": ["3-6 bullet strings, each one specific event with country/entity/number where present"],
+    "sentiment_score": <float -1..1, aggregate market impact>,
+    "sentiment_label": "bullish"|"bearish"|"neutral"
+  }}
+}}
+
+If no headlines are oil-relevant, set digest.summary="No material oil news in this window." with empty key_events and sentiment_score=0."""
+
 
 _anthropic_client: anthropic.Anthropic | None = None
 
@@ -68,6 +95,21 @@ def _get_client() -> anthropic.Anthropic:
     if _anthropic_client is None:
         _anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     return _anthropic_client
+
+
+def _strip_json_object(text: str) -> str:
+    """Strip markdown fences; extract first {...} block if needed."""
+    text = text.strip()
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fence:
+        text = fence.group(1).strip()
+    if not text.startswith("{"):
+        m = re.search(r"\{[\s\S]*\}", text)
+        if m:
+            text = m.group(0)
+    # Remove trailing commas before } or ]
+    text = re.sub(r",\s*([\]\}])", r"\1", text)
+    return text
 
 
 def fetch_marketfeed_messages() -> list[dict[str, Any]]:
@@ -124,7 +166,7 @@ def _is_oil_relevant(title: str) -> bool:
 
 
 def classify_message(title: str) -> dict[str, Any] | None:
-    """Use Claude Haiku to classify a single headline."""
+    """Use Claude Haiku to classify a single headline (fallback only)."""
     try:
         response = _get_client().messages.create(
             model="claude-haiku-4-5-20251001",
@@ -134,6 +176,8 @@ def classify_message(title: str) -> dict[str, Any] | None:
         text = response.content[0].text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
+        # Remove trailing commas
+        text = re.sub(r",\s*([\]\}])", r"\1", text)
         data = json.loads(text)
         return {
             "sentiment": str(data.get("sentiment", "neutral")).lower(),
@@ -146,8 +190,141 @@ def classify_message(title: str) -> dict[str, Any] | None:
         return None
 
 
+def classify_messages_batch(messages: list[dict]) -> tuple[list[dict[str, Any] | None], dict | None]:
+    """Classify all messages and produce a digest in a SINGLE Haiku call.
+
+    Args:
+        messages: list of dicts with at least a ``title`` key.
+
+    Returns:
+        (classifications, digest) where:
+          - classifications: list of per-message dicts (sentiment/score/relevance/reason),
+            same length as messages, None entries mean classification failed.
+          - digest: dict with summary/key_events/sentiment_score/sentiment_label,
+            or None if the batch call failed entirely.
+
+    On failure, falls back to per-message classify_message() calls (digest=None).
+    """
+    if not messages:
+        return [], None
+
+    numbered_headlines = "\n".join(
+        f"{i}. {m['title']}" for i, m in enumerate(messages)
+    )
+    prompt = _COMBINED_PROMPT.format(
+        n=len(messages),
+        numbered_headlines=numbered_headlines,
+    )
+
+    raw = ""
+    try:
+        response = _get_client().messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=3000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        cleaned = _strip_json_object(raw)
+        data = json.loads(cleaned)
+
+        items_raw = data.get("items", [])
+        digest_raw = data.get("digest", {})
+
+        if not isinstance(items_raw, list) or len(items_raw) != len(messages):
+            logger.warning(
+                "Combined batch items length mismatch (got %s, expected %d) — falling back",
+                len(items_raw) if isinstance(items_raw, list) else "None",
+                len(messages),
+            )
+            raise ValueError("items length mismatch")
+
+        classifications: list[dict[str, Any] | None] = []
+        for i, msg in enumerate(messages):
+            # Prefer item with matching "i" field, else fall back to position
+            item = next((x for x in items_raw if x.get("i") == i), items_raw[i] if i < len(items_raw) else {})
+            classifications.append({
+                "sentiment": str(item.get("sentiment", "neutral")).lower(),
+                "score": float(item.get("score", 0.0)),
+                "relevance": float(item.get("relevance", 0.0)),
+                "reason": str(item.get("reason", "")),
+            })
+
+        digest: dict | None = None
+        if isinstance(digest_raw, dict):
+            key_events = digest_raw.get("key_events") or []
+            if not isinstance(key_events, list):
+                key_events = [str(key_events)]
+            digest = {
+                "summary": str(digest_raw.get("summary", "")).strip(),
+                "key_events": key_events,
+                "sentiment_score": float(digest_raw.get("sentiment_score", 0.0)),
+                "sentiment_label": str(digest_raw.get("sentiment_label", "neutral")).lower(),
+            }
+
+        logger.info(
+            "Combined batch: classified %d messages + produced digest in 1 Haiku call",
+            len(messages),
+        )
+        return classifications, digest
+
+    except Exception:
+        logger.warning(
+            "Combined batch classify failed (raw=%r) — falling back to per-message",
+            raw[:300] if raw else "",
+        )
+        # Fallback: classify one by one, no digest
+        classifications = [classify_message(m["title"]) for m in messages]
+        return classifications, None
+
+
+def _store_digest(digest: dict, message_count: int) -> None:
+    """Persist a KnowledgeSummary row and publish to knowledge.summary stream."""
+    now = datetime.now(tz=timezone.utc)
+    try:
+        with SessionLocal() as session:
+            row = KnowledgeSummary(
+                timestamp=now,
+                source=_SOURCE_NAME,
+                window="5min",
+                message_count=message_count,
+                summary=digest["summary"][:5000],
+                key_events=json.dumps(digest["key_events"])[:5000],
+                sentiment_score=digest["sentiment_score"],
+                sentiment_label=digest["sentiment_label"][:16],
+            )
+            session.add(row)
+            session.commit()
+        logger.info(
+            "@marketfeed digest stored: %d msgs, sentiment=%s (%+.2f)",
+            message_count, digest["sentiment_label"], digest["sentiment_score"],
+        )
+    except Exception:
+        logger.exception("Failed to store @marketfeed KnowledgeSummary")
+
+    payload = {
+        "type": "marketfeed_digest",
+        "timestamp": now.isoformat(),
+        "source": _SOURCE_NAME,
+        "window": "5min",
+        "message_count": message_count,
+        "summary": digest["summary"],
+        "key_events": digest["key_events"],
+        "sentiment_score": digest["sentiment_score"],
+        "sentiment_label": digest["sentiment_label"],
+    }
+    try:
+        publish(_KNOWLEDGE_STREAM, payload)
+        logger.info("Published @marketfeed digest to stream '%s'", _KNOWLEDGE_STREAM)
+    except Exception:
+        logger.exception("Failed to publish marketfeed digest")
+
+
 def collect_and_store() -> None:
-    """Scrape @marketfeed, score new oil-relevant messages, persist to DB."""
+    """Scrape @marketfeed, score new oil-relevant messages, persist to DB.
+
+    Wave 2: uses a single combined Haiku call to classify all messages AND
+    produce a 5-minute digest simultaneously (instead of N+1 calls).
+    """
     try:
         messages = fetch_marketfeed_messages()
     except Exception:
@@ -174,7 +351,7 @@ def collect_and_store() -> None:
     if not new_messages:
         return
 
-    # Pre-filter by keyword to save Haiku tokens
+    # Pre-filter by keyword to save Haiku tokens (keep this optimisation)
     relevant = [m for m in new_messages if _is_oil_relevant(m["title"])]
     logger.info("@marketfeed: %d/%d new messages match oil keywords",
                 len(relevant), len(new_messages))
@@ -182,12 +359,14 @@ def collect_and_store() -> None:
     if not relevant:
         return
 
+    # ONE combined Haiku call: classify all + produce digest
+    classifications, digest = classify_messages_batch(relevant)
+
     stored: list[dict[str, Any]] = []
     skipped = 0
     with SessionLocal() as session:
-        for msg in relevant:
-            classification = classify_message(msg["title"])
-            if classification is None or classification["relevance"] < 0.3:
+        for msg, cls in zip(relevant, classifications):
+            if cls is None or cls["relevance"] < 0.3:
                 skipped += 1
                 continue
 
@@ -196,17 +375,17 @@ def collect_and_store() -> None:
                 source=_SOURCE_NAME,
                 title=msg["title"][:1000],
                 url=msg["url"],
-                sentiment=classification["sentiment"][:16],
-                score=classification["score"],
-                relevance=classification["relevance"],
+                sentiment=cls["sentiment"][:16],
+                score=cls["score"],
+                relevance=cls["relevance"],
             )
             session.add(row)
             stored.append({
                 "title": msg["title"][:200],
                 "url": msg["url"],
-                "score": classification["score"],
-                "relevance": classification["relevance"],
-                "reason": classification["reason"],
+                "score": cls["score"],
+                "relevance": cls["relevance"],
+                "reason": cls.get("reason", ""),
             })
         session.commit()
 
@@ -217,9 +396,8 @@ def collect_and_store() -> None:
         return
 
     # Publish a SentimentEvent summarising this batch
-    avg_score = sum(s["score"] * s["relevance"] for s in stored) / sum(
-        s["relevance"] for s in stored
-    )
+    total_weight = sum(s["relevance"] for s in stored)
+    avg_score = sum(s["score"] * s["relevance"] for s in stored) / total_weight
     event = SentimentEvent(
         timestamp=datetime.now(tz=timezone.utc),
         source_type="news",
@@ -230,3 +408,9 @@ def collect_and_store() -> None:
     )
     publish(_STREAM, event.model_dump())
     logger.info("Published @marketfeed SentimentEvent (avg score %+.2f)", avg_score)
+
+    # Also store + publish the digest (produced in the same Haiku call above)
+    if digest is not None:
+        _store_digest(digest, len(stored))
+    else:
+        logger.info("No digest produced (batch fallback was used); marketfeed_summary.py can handle it")

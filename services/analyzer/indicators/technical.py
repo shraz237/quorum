@@ -110,17 +110,31 @@ def score_bollinger(price: float, upper: float, lower: float, mid: float) -> flo
     return _clamp(score)
 
 
-def aggregate_technical(scores_dict: dict[str, float | None]) -> float:
-    """Weighted aggregate of individual indicator scores.
+def aggregate_technical(scores_dict: dict[str, float | None], adx: float | None = None) -> float:
+    """Weighted aggregate of individual indicator scores, regime-adjusted by ADX.
 
-    Weights: rsi=0.25, macd=0.25, ma_cross=0.30, bbands=0.20
+    ADX regime logic:
+      adx > 25 → Trend regime: momentum indicators (MACD, MA) dominate.
+      adx < 20 → Chop regime: mean-reversion indicators (RSI, BB) dominate.
+      otherwise → Equal / unknown weights.
+
     Ignores None values and renormalises weights accordingly.
     """
+    if adx is not None and adx > 25:
+        # Trend regime: momentum dominates
+        rsi_w, macd_w, ma_w, bb_w = 0.10, 0.35, 0.40, 0.15
+    elif adx is not None and adx < 20:
+        # Chop regime: mean-reversion dominates
+        rsi_w, macd_w, ma_w, bb_w = 0.35, 0.15, 0.10, 0.40
+    else:
+        # Mixed / unknown: equal weights
+        rsi_w, macd_w, ma_w, bb_w = 0.25, 0.25, 0.25, 0.25
+
     weights: dict[str, float] = {
-        "rsi": 0.25,
-        "macd": 0.25,
-        "ma_cross": 0.30,
-        "bbands": 0.20,
+        "rsi": rsi_w,
+        "macd": macd_w,
+        "ma_cross": ma_w,
+        "bbands": bb_w,
     }
 
     total_weight = 0.0
@@ -135,6 +149,32 @@ def aggregate_technical(scores_dict: dict[str, float | None]) -> float:
         return 0.0
 
     return _clamp(weighted_sum / total_weight)
+
+
+def compute_adx(df: pd.DataFrame, length: int = 14) -> float | None:
+    """Return latest ADX value (0-100). Higher = stronger trend.
+
+    Uses pandas-ta adx() which returns a DataFrame with an ADX_<length> column.
+    Returns None if insufficient data or computation fails.
+    """
+    try:
+        import pandas_ta as ta  # type: ignore[import]
+    except ImportError:
+        return None
+    try:
+        adx_df = ta.adx(df["high"], df["low"], df["close"], length=length)
+        if adx_df is None or adx_df.empty:
+            return None
+        # pandas-ta returns a DataFrame with ADX_14 column
+        col = next((c for c in adx_df.columns if c.startswith("ADX_")), None)
+        if col is None:
+            return None
+        val = adx_df[col].iloc[-1]
+        if np.isnan(val):
+            return None
+        return float(val)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +301,11 @@ def _compute_indicators_for_df(df: pd.DataFrame) -> float | None:
     if not scores:
         return None
 
-    return aggregate_technical(scores)
+    # Compute ADX for regime detection; pass into aggregation
+    adx = compute_adx(df)
+    if adx is not None:
+        logger.debug("ADX=%.1f → %s regime", adx, "trend" if adx > 25 else ("chop" if adx < 20 else "mixed"))
+    return aggregate_technical(scores, adx=adx)
 
 
 def compute_technical_score() -> float | None:

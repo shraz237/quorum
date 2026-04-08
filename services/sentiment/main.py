@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from sources.rss import collect_and_store as rss_collect
 from sources.twitter import collect_and_store as twitter_collect
 from sources.marketfeed import collect_and_store as marketfeed_collect
-from sources.marketfeed_summary import collect_and_store as marketfeed_summary_collect
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,7 +49,10 @@ def main() -> None:
         next_run_time=datetime.now(tz=timezone.utc),  # fire immediately on startup
     )
 
-    # Telegram @marketfeed channel: every 5 minutes
+    # Telegram @marketfeed channel: every 5 minutes.
+    # Wave 2: marketfeed.py now produces BOTH per-message classification AND
+    # a 5-minute digest in a single combined Haiku call, so the separate
+    # marketfeed_summary job is no longer needed.
     scheduler.add_job(
         safe_run,
         "interval",
@@ -60,20 +62,9 @@ def main() -> None:
         next_run_time=datetime.now(tz=timezone.utc),
     )
 
-    # @marketfeed 5-min digest summary: runs 60 seconds AFTER scrape so the
-    # digest sees the freshly-stored messages.
-    scheduler.add_job(
-        safe_run,
-        "interval",
-        minutes=5,
-        args=[marketfeed_summary_collect, "marketfeed_summary"],
-        id="marketfeed_summary",
-        next_run_time=datetime.now(tz=timezone.utc) + timedelta(seconds=60),
-    )
-
     logger.info(
         "Sentiment scheduler starting — RSS 30min, Twitter 15min, "
-        "@marketfeed 5min, marketfeed_summary 5min"
+        "@marketfeed 5min (classify+digest combined)"
     )
     scheduler.start()
 

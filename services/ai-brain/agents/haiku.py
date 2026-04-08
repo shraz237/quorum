@@ -54,17 +54,19 @@ def summarize_scores(scores: dict) -> str:
     str
         A short narrative summary, or a fallback string on error.
     """
+    current_price = _get_current_price()
+    if current_price is None:
+        logger.warning("No current price available — refusing to call LLM (would hallucinate prices)")
+        return "Price unavailable — analysis skipped."
+
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     scores_text = "\n".join(
         f"  {k}: {v}" for k, v in scores.items()
     )
-    current_price = _get_current_price()
     price_anchor = (
         f"FACT — current Brent (ICE) price is ${current_price:.2f}. "
         f"Use ONLY this price level if you reference any number — do not invent prices.\n\n"
-        if current_price is not None
-        else ""
     )
     prompt = (
         f"{price_anchor}"

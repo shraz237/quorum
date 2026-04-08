@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
+import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from shared.redis_streams import subscribe, publish
 from shared.schemas.events import RecommendationEvent
@@ -36,6 +36,49 @@ CONSUMER = "ai-brain-1"
 # Prevents stacking positions when Opus is uncertain or stuck in a loop.
 MIN_OPEN_CONFIDENCE = 0.65
 
+# --- Task 3: Score cache — skip LLM cycle when scores are flat ---
+_last_processed_scores: dict | None = None
+_last_processed_ts: float = 0
+_SCORE_CACHE_TTL_SECONDS = 1800  # 30 min
+_SCORE_DELTA_THRESHOLD = 5.0  # on -100..+100 scale
+
+
+def _should_publish_recommendation(rec: dict) -> bool:
+    """Return True if the recommendation is materially different from the previous one.
+
+    Suppresses publish when action, unified_score (±10), and confidence (±0.10)
+    are all unchanged within the last 30 minutes.
+    """
+    from shared.models.base import SessionLocal
+    from shared.models.signals import AIRecommendation
+    from sqlalchemy import desc
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+    try:
+        with SessionLocal() as session:
+            prev = (
+                session.query(AIRecommendation)
+                .filter(AIRecommendation.timestamp >= cutoff)
+                .order_by(desc(AIRecommendation.timestamp))
+                .first()
+            )
+            if prev is None:
+                return True
+            if prev.action != rec.get("action"):
+                return True
+            prev_score = prev.unified_score or 0
+            new_score = rec.get("unified_score") or 0
+            if abs(new_score - prev_score) >= 10:
+                return True
+            prev_conf = prev.confidence or 0
+            new_conf = rec.get("confidence") or 0
+            if abs(new_conf - prev_conf) >= 0.10:
+                return True
+            return False
+    except Exception:
+        logger.exception("signal_change_gate failed, defaulting to publish")
+        return True
+
 
 def _publish_position_event(kind: str, snap: dict) -> None:
     """Publish a position lifecycle event to the notifier."""
@@ -53,6 +96,8 @@ def _publish_position_event(kind: str, snap: dict) -> None:
 
 def process_scores(scores: dict) -> None:
     """Run the full AI pipeline for a given scores event and publish the result."""
+    global _last_processed_scores, _last_processed_ts
+
     unified = scores.get("unified_score")
     tech = scores.get("technical_score")
     fund = scores.get("fundamental_score")
@@ -78,6 +123,26 @@ def process_scores(scores: dict) -> None:
     open_positions = list_open_positions()
     if open_positions:
         logger.info("Tracking %d open positions", len(open_positions))
+
+    # --- Task 3: Score cache — skip LLM cycle when unified_score barely moved ---
+    now = _time.time()
+    if (
+        _last_processed_scores is not None
+        and (now - _last_processed_ts) < _SCORE_CACHE_TTL_SECONDS
+    ):
+        prev_unified = _last_processed_scores.get("unified_score") or 0
+        new_unified = scores.get("unified_score") or 0
+        if abs(new_unified - prev_unified) < _SCORE_DELTA_THRESHOLD:
+            logger.info(
+                "Scores unchanged within ±%.1f (prev=%.1f new=%.1f) — skipping LLM cycle",
+                _SCORE_DELTA_THRESHOLD,
+                prev_unified,
+                new_unified,
+            )
+            return
+
+    _last_processed_scores = dict(scores)
+    _last_processed_ts = now
 
     # --- Step 1: Haiku + Grok in parallel ---
     haiku_summary: str = ""
@@ -179,7 +244,7 @@ def process_scores(scores: dict) -> None:
                 except Exception:
                     logger.exception("Failed to open position from recommendation")
 
-    # --- Step 3: Publish to Redis stream ---
+    # --- Step 3: Publish to Redis stream (with signal change gate) ---
     event = RecommendationEvent(
         timestamp=datetime.now(timezone.utc),
         action=rec.get("action", "WAIT"),
@@ -192,11 +257,17 @@ def process_scores(scores: dict) -> None:
         haiku_summary=haiku_summary,
         grok_narrative=grok_narrative,
     )
-    try:
-        publish(STREAM_OUT, event.model_dump())
-        logger.info("Published RecommendationEvent to %s", STREAM_OUT)
-    except Exception:
-        logger.exception("Failed to publish recommendation to Redis")
+    # Task 4: Only publish if recommendation changed materially from the previous one
+    if _should_publish_recommendation(rec):
+        try:
+            publish(STREAM_OUT, event.model_dump())
+            logger.info("Published RecommendationEvent to %s", STREAM_OUT)
+        except Exception:
+            logger.exception("Failed to publish recommendation to Redis")
+    else:
+        logger.info(
+            "RecommendationEvent suppressed (no material change from previous) — stored in DB only"
+        )
 
 
 def main() -> None:

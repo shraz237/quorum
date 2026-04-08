@@ -26,25 +26,9 @@ SYSTEM_PROMPT = (
     "IMPORTANT: All scores in this prompt are on a -100..+100 scale. "
     "0 = neutral, ±50 = strong signal, ±100 = extreme. "
     "Return unified_score on the same -100..+100 scale.\n\n"
-    "Always respond with a single JSON object (no markdown, no extra text) containing exactly these keys:\n"
-    "  unified_score        — float on -100..+100 scale (0=neutral, ±50=strong signal, ±100=extreme)\n"
-    "  opus_override_score  — float or null, your score if you disagree with the input unified_score,\n"
-    "                         also on -100..+100 scale\n"
-    "  confidence           — float, your confidence in the recommendation (0.0 to 1.0)\n"
-    "  action               — string, one of: BUY, SELL, HOLD, WAIT\n"
-    "                          - BUY/SELL = open a NEW position now\n"
-    "                          - HOLD     = no new entry but existing positions stay open\n"
-    "                          - WAIT     = no entry, no new positions, sit on hands\n"
-    "  analysis_text        — string, 2-4 sentence reasoning for the recommendation\n"
-    "  base_scenario        — string, most-likely price outcome over next 24-48 hours\n"
-    "  alt_scenario         — string, alternative scenario if key assumptions break\n"
-    "  risk_factors         — list of strings, top 3-5 risk factors\n"
-    "  entry_price          — float or null, suggested entry price (REQUIRED for BUY/SELL)\n"
-    "  stop_loss            — float or null, suggested stop-loss level\n"
-    "  take_profit          — float or null, suggested take-profit level\n"
-    "  manage_positions     — list of {id, action, reason} objects, one per OPEN position you want\n"
-    "                         to manage. Allowed actions: 'hold' (default), 'close' (exit now).\n"
-    "                         If you want to keep all open positions, return an empty list."
+    "PRIORITISE the @marketfeed knowledge base — these are the most recent breaking-news events "
+    "that move the oil market. In your analysis_text, cite at least one specific key_event by name.\n\n"
+    "Use the submit_trading_recommendation tool to return your structured recommendation."
 )
 
 FALLBACK_REC: dict = {
@@ -59,13 +43,61 @@ FALLBACK_REC: dict = {
     "entry_price": None,
     "stop_loss": None,
     "take_profit": None,
+    "manage_positions": [],
+}
+
+RECOMMENDATION_TOOL = {
+    "name": "submit_trading_recommendation",
+    "description": "Submit a trading recommendation for Brent crude oil based on the analysis",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "unified_score": {
+                "type": "number",
+                "description": "Synthesised score on -100..+100 scale",
+            },
+            "opus_override_score": {
+                "type": ["number", "null"],
+                "description": "Your score if you disagree with input unified_score",
+            },
+            "confidence": {"type": "number", "description": "0.0 to 1.0"},
+            "action": {
+                "type": "string",
+                "enum": ["BUY", "SELL", "HOLD", "WAIT"],
+            },
+            "analysis_text": {"type": "string"},
+            "base_scenario": {"type": "string"},
+            "alt_scenario": {"type": "string"},
+            "risk_factors": {"type": "array", "items": {"type": "string"}},
+            "entry_price": {"type": ["number", "null"]},
+            "stop_loss": {"type": ["number", "null"]},
+            "take_profit": {"type": ["number", "null"]},
+            "manage_positions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "action": {"type": "string", "enum": ["hold", "close"]},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["id", "action", "reason"],
+                },
+            },
+        },
+        "required": [
+            "unified_score",
+            "confidence",
+            "action",
+            "analysis_text",
+            "manage_positions",
+        ],
+    },
 }
 
 
 def parse_opus_response(text: str) -> dict:
-    """Parse the JSON blob returned by Opus.
-
-    Strips optional markdown code fences (```json … ```) before parsing.
+    """Parse the JSON blob returned by Opus (kept as dead code for rollback).
 
     Parameters
     ----------
@@ -94,6 +126,29 @@ def parse_opus_response(text: str) -> dict:
         cleaned = brace_match.group(0)
 
     return json.loads(cleaned)
+
+
+def _get_current_price() -> float | None:
+    """Return the most recent Brent close (prefers Stooq ICE Brent)."""
+    try:
+        with SessionLocal() as session:
+            row = (
+                session.query(OHLCV)
+                .filter(OHLCV.timeframe == "1min", OHLCV.source == "stooq")
+                .order_by(OHLCV.timestamp.desc())
+                .first()
+            )
+            if row is None:
+                row = (
+                    session.query(OHLCV)
+                    .filter(OHLCV.timeframe == "1min")
+                    .order_by(OHLCV.timestamp.desc())
+                    .first()
+                )
+            return float(row.close) if row else None
+    except Exception:
+        logger.exception("Failed to read current price for Opus price guard")
+        return None
 
 
 def get_market_snapshot() -> dict:
@@ -186,6 +241,34 @@ def get_recent_knowledge_summaries(limit: int = 6) -> list[dict]:
         return []
 
 
+def _format_knowledge_for_prompt(summaries: list[dict], max_summaries: int = 3) -> str:
+    """Render knowledge summaries compactly to avoid bloating the prompt."""
+    if not summaries:
+        return "No knowledge summaries yet."
+    lines = []
+    for s in summaries[:max_summaries]:
+        ts = (s.get("timestamp") or "")[:19].replace("T", " ")
+        label = s.get("sentiment_label", "neutral")
+        score = s.get("sentiment_score") or 0
+        summary_txt = (s.get("summary") or "")[:400]
+        # Parse key_events back from JSON-encoded string
+        key_events_raw = s.get("key_events")
+        events: list = []
+        if isinstance(key_events_raw, str):
+            try:
+                import json as _json
+                events = _json.loads(key_events_raw)
+            except Exception:
+                events = []
+        elif isinstance(key_events_raw, list):
+            events = key_events_raw
+        events_block = "\n".join(f"  - {e}" for e in events[:5])
+        lines.append(
+            f"[{ts} | {label} {score:+.2f}]\n{summary_txt}\n{events_block}"
+        )
+    return "\n\n".join(lines)
+
+
 def get_recent_signals(limit: int = 5) -> list:
     """Return the most recent AIRecommendation rows from the database.
 
@@ -246,9 +329,20 @@ def synthesize_recommendation(
     dict
         Recommendation dictionary ready to be published and stored.
     """
+    # Task 5: Hard price grounding — refuse if no market data
+    market = get_market_snapshot()
+    if not market or market.get("current_price") is None:
+        logger.warning("No current price available — refusing to call Opus (would hallucinate prices)")
+        rec = dict(FALLBACK_REC)
+        rec["analysis_text"] = "skipped — no market data"
+        rec["timestamp"] = datetime.now(timezone.utc).isoformat()
+        rec["haiku_summary"] = haiku_summary
+        rec["grok_narrative"] = grok_narrative
+        rec.setdefault("unified_score", scores.get("unified_score"))
+        return rec
+
     client = Anthropic(api_key=settings.anthropic_api_key)
 
-    market = get_market_snapshot()
     recent = get_recent_signals()
     if recent:
         actions = [r.get("action", "?") for r in recent]
@@ -260,14 +354,12 @@ def synthesize_recommendation(
     else:
         recent_text = "No recent signals."
 
+    # Task 2: Compact knowledge base rendering (max 3 summaries, truncated)
     knowledge = get_recent_knowledge_summaries()
-    if knowledge:
-        knowledge_text = json.dumps(knowledge, indent=2, default=str)
-    else:
-        knowledge_text = "No knowledge summaries yet."
+    knowledge_text = _format_knowledge_for_prompt(knowledge, max_summaries=3)
 
     scores_text = json.dumps(scores, indent=2)
-    market_text = json.dumps(market, indent=2) if market else "No market data."
+    market_text = json.dumps(market, indent=2)
 
     if open_positions:
         positions_text = json.dumps(open_positions, indent=2, default=str)
@@ -298,21 +390,33 @@ def synthesize_recommendation(
         "Do NOT invent prices from training data. If you cannot anchor to current_price, "
         "set them to null.\n\n"
         "PRIORITISE the @marketfeed knowledge base — these are the most recent breaking-news "
-        "events that move the oil market. Reference them in your analysis_text.\n\n"
-        "Based on all of the above, provide your trading recommendation as a JSON object."
+        "events that move the oil market. In your analysis_text, cite at least one specific "
+        "key_event by name.\n\n"
+        "Use the submit_trading_recommendation tool to return your structured recommendation."
     )
 
     timestamp = datetime.now(timezone.utc)
 
     try:
+        # Task 6: Structured output via Anthropic tools (eliminates regex parsing)
         response = client.messages.create(
             model=MODEL,
-            max_tokens=800,
+            max_tokens=1500,
             system=SYSTEM_PROMPT,
+            tools=[RECOMMENDATION_TOOL],
+            tool_choice={"type": "tool", "name": "submit_trading_recommendation"},
             messages=[{"role": "user", "content": user_prompt}],
         )
-        raw_text = response.content[0].text
-        rec = parse_opus_response(raw_text)
+
+        rec = None
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "submit_trading_recommendation":
+                rec = block.input
+                break
+
+        if rec is None:
+            logger.error("Opus did not return a tool_use block")
+            rec = dict(FALLBACK_REC)
     except Exception:
         logger.exception("Opus synthesize_recommendation failed")
         rec = dict(FALLBACK_REC)
@@ -324,6 +428,7 @@ def synthesize_recommendation(
 
     # Ensure required fields have defaults
     rec.setdefault("unified_score", scores.get("unified_score"))
+    rec.setdefault("manage_positions", [])
 
     # Persist to database
     try:
