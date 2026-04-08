@@ -219,6 +219,15 @@ Guidelines:
   - When one specialty (e.g. geopolitics) is STRONG on one side and the other
     two on that side are weak, don't over-weight it — prefer the side where the
     balance of three is strongest.
+  - SAME-DOMAIN NEUTRALIZATION: If bull and bear specialists in the SAME domain
+    (e.g. technical_bull vs technical_bear) have confidence within 0.15 of each
+    other AND look at the same price action/data, treat that domain as NEUTRAL
+    in your scoring — they are framing the same facts differently, not providing
+    independent evidence. Explicitly call this out in the rationale: "technicals
+    neutralize — bull and bear interpret the same bounce as buying/dead-cat".
+  - AGENT FAILURES: If an agent has status="agent_failed", DO NOT count it in the
+    team average and explicitly note the failure in rationale. Reduce the
+    effective team size (e.g. if bull macro failed, bull team is 2 agents).
   - If the teams are roughly balanced (bull_team_avg ≈ bear_team_avg), prefer WAIT
     and point to the specific trigger that would break the tie.
   - Always check existing open campaigns (from context) — don't recommend opening
@@ -232,20 +241,32 @@ Return ONLY a JSON object (no markdown, no preamble):
   "winning_specialties": ["which specialties won the debate, e.g. ['technical_bull','macro_bull']"],
   "conviction_score": <float -100 to +100, negative=bear, positive=bull>,
   "confidence": <float 0.0 to 1.0>,
-  "rationale": "3-5 sentences explaining the decision and which specialists carried the day",
+  "rationale": "3-5 sentences explaining the decision and which specialists carried the day. MUST explicitly note any same-domain neutralization and any agent failures.",
   "key_pros": ["3-4 reasons supporting the verdict, citing which specialist raised each"],
   "key_cons": ["3-4 risks to the verdict, citing which specialist raised each"],
-  "specific_action": "concrete next step: entry level, SL, TP, or 'wait for X event'",
+  "specific_action": "concrete next step in plain text: entry level, SL, TP, or 'wait for X event'",
+  "trade_levels": {
+    "entry": <float|null — specific entry level in USD, or null if action is WAIT/AVOID>,
+    "stop_loss": <float|null>,
+    "take_profit": <float|null>,
+    "side": "LONG" | "SHORT" | null
+  },
+  "neutralized_domains": ["list of domains where bull/bear cancelled out, e.g. ['technical']"],
+  "failed_agents": ["list of agent labels that had status='agent_failed'"],
   "team_scores": {
-    "bull_team_avg": <float 0-10>,
-    "bear_team_avg": <float 0-10>,
+    "bull_team_avg": <float 0-10, computed over NON-FAILED bull agents only>,
+    "bear_team_avg": <float 0-10, computed over NON-FAILED bear agents only>,
     "strongest_specialist": "name of the single strongest case across both teams"
   },
   "agent_ratings": {
     "geopolitics_bull": <0-10>, "technical_bull": <0-10>, "macro_bull": <0-10>,
     "geopolitics_bear": <0-10>, "technical_bear": <0-10>, "macro_bear": <0-10>
   }
-}"""
+}
+
+IMPORTANT: trade_levels MUST be filled when action is ENTER_LONG or ENTER_SHORT.
+For WAIT/AVOID/MANAGE_EXISTING, set entry/sl/tp to null. R:R will be computed
+deterministically downstream — do NOT mention R:R ratios in your rationale text."""
 
 
 _client: Anthropic | None = None
@@ -297,7 +318,119 @@ def _fetch_context(focus_hours: int) -> dict:
         logger.exception("analytics sub-tool failed in committee context fetch")
         context["analytics_error"] = str(exc)
 
+    # Active live-watch session — so the committee knows if the user is already
+    # monitoring the same setup and can reference it in its verdict.
+    try:
+        from plugin_live_watch import _get_active_watch
+        context["active_watch"] = _get_active_watch()
+    except Exception as exc:
+        logger.warning("active_watch fetch failed: %s", exc)
+        context["active_watch"] = {"error": str(exc)}
+
     return context
+
+
+def _compute_risk_reward(trade_levels: dict | None) -> dict | None:
+    """Compute R:R ratio deterministically from entry/SL/TP.
+
+    Returns None if any level is missing or if the geometry is nonsensical
+    (e.g. SL on the wrong side of entry for the given direction).
+    """
+    if not trade_levels:
+        return None
+    entry = trade_levels.get("entry")
+    sl = trade_levels.get("stop_loss")
+    tp = trade_levels.get("take_profit")
+    side = (trade_levels.get("side") or "").upper()
+    if entry is None or sl is None or tp is None or side not in ("LONG", "SHORT"):
+        return None
+    try:
+        entry = float(entry); sl = float(sl); tp = float(tp)
+    except (TypeError, ValueError):
+        return None
+
+    if side == "LONG":
+        risk = entry - sl
+        reward = tp - entry
+        geometry_ok = sl < entry < tp
+    else:  # SHORT
+        risk = sl - entry
+        reward = entry - tp
+        geometry_ok = tp < entry < sl
+
+    if not geometry_ok or risk <= 0 or reward <= 0:
+        return {
+            "side": side,
+            "entry": entry,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "risk_usd": round(risk, 2),
+            "reward_usd": round(reward, 2),
+            "rr_ratio": None,
+            "geometry_error": "SL/TP on wrong side of entry for declared direction",
+        }
+
+    rr = reward / risk
+    return {
+        "side": side,
+        "entry": entry,
+        "stop_loss": sl,
+        "take_profit": tp,
+        "risk_usd": round(risk, 2),
+        "reward_usd": round(reward, 2),
+        "rr_ratio": round(rr, 2),
+        "rr_text": f"1:{rr:.2f}",
+    }
+
+
+_REQUIRED_AGENT_FIELDS = (
+    "side",
+    "thesis",
+    "key_arguments",
+    "confidence",
+    "case_strength",
+)
+
+
+def _validate_agent_output(parsed: dict, label: str, raw: str) -> dict:
+    """Ensure an agent's JSON response has the required fields.
+
+    Returns the parsed dict augmented with a "status" field. If any required
+    field is missing or malformed, returns an explicit failure marker so
+    downstream rendering can flag it instead of silently showing dashes.
+    """
+    missing = [f for f in _REQUIRED_AGENT_FIELDS if f not in parsed or parsed[f] in (None, "", [])]
+    if missing:
+        return {
+            "status": "agent_failed",
+            "error": f"missing_fields: {', '.join(missing)}",
+            "raw_excerpt": raw[:400],
+            "specialty": label,
+        }
+
+    # Normalise confidence to float in [0, 1]
+    try:
+        conf = float(parsed.get("confidence", 0.0))
+        parsed["confidence"] = max(0.0, min(1.0, conf))
+    except (TypeError, ValueError):
+        return {
+            "status": "agent_failed",
+            "error": "confidence is not a number",
+            "raw_excerpt": raw[:400],
+            "specialty": label,
+        }
+
+    # Normalise case_strength
+    if parsed.get("case_strength") not in ("strong", "moderate", "weak"):
+        return {
+            "status": "agent_failed",
+            "error": f"case_strength invalid: {parsed.get('case_strength')}",
+            "raw_excerpt": raw[:400],
+            "specialty": label,
+        }
+
+    parsed["status"] = "ok"
+    return parsed
 
 
 def _run_agent(system_prompt: str, context: dict, label: str) -> dict:
@@ -308,6 +441,7 @@ def _run_agent(system_prompt: str, context: dict, label: str) -> dict:
         f"Build your {label} case now. Return ONLY the JSON object."
     )
 
+    raw = ""
     try:
         response = _get_client().messages.create(
             model=BULL_BEAR_MODEL,
@@ -317,10 +451,24 @@ def _run_agent(system_prompt: str, context: dict, label: str) -> dict:
         )
         raw = response.content[0].text if response.content else ""
         cleaned = _strip_json(raw)
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        return _validate_agent_output(parsed, label, raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("%s agent returned unparseable JSON: %s", label, exc)
+        return {
+            "status": "agent_failed",
+            "error": f"json_decode: {exc}",
+            "raw_excerpt": raw[:400],
+            "specialty": label,
+        }
     except Exception as exc:
         logger.exception("%s agent failed", label)
-        return {"error": f"{label} agent failed: {exc}"}
+        return {
+            "status": "agent_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "raw_excerpt": raw[:400],
+            "specialty": label,
+        }
 
 
 # Team roster: (specialist_label, system_prompt, side)
@@ -386,11 +534,26 @@ def _committee_debate(focus_hours: int = 4) -> dict:
     bull_team_results = {label: results.get(label, {}) for label, _ in _BULL_TEAM}
     bear_team_results = {label: results.get(label, {}) for label, _ in _BEAR_TEAM}
 
+    # Count successful agents per team so downstream renderers can show
+    # "4/6 agents reported" etc instead of silently hiding failures.
+    failed_agents = [
+        label for label, r in {**bull_team_results, **bear_team_results}.items()
+        if r.get("status") == "agent_failed"
+    ]
+
     judge_result = _run_judge(context, bull_team_results, bear_team_results)
+
+    # Deterministically compute R:R from judge's trade_levels — the LLM
+    # sometimes hallucinates the math (e.g. claims 2.5:1 when it's actually
+    # 3.1:1). This overwrites any R:R the judge might have baked into text.
+    risk_reward = None
+    if isinstance(judge_result, dict):
+        risk_reward = _compute_risk_reward(judge_result.get("trade_levels"))
 
     ended = datetime.now(tz=timezone.utc)
     duration_seconds = (ended - started).total_seconds()
 
+    active_watch = context.get("active_watch") or {}
     return {
         "started_at": started.isoformat(),
         "duration_seconds": round(duration_seconds, 1),
@@ -399,7 +562,11 @@ def _committee_debate(focus_hours: int = 4) -> dict:
             "unified_score": ((context.get("market") or {}).get("scores") or {}).get("unified"),
             "news_count": ((context.get("news") or {}).get("count")),
             "open_campaigns": ((context.get("market") or {}).get("account") or {}).get("open_campaigns"),
+            "active_watch_session_id": (active_watch.get("session") or {}).get("session_id") if active_watch.get("active") else None,
         },
+        "failed_agents": failed_agents,
+        "agents_reporting": f"{6 - len(failed_agents)}/6",
+        "risk_reward": risk_reward,
         "bull_team": bull_team_results,
         "bear_team": bear_team_results,
         "judge_verdict": judge_result,
