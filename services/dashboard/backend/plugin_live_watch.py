@@ -102,11 +102,52 @@ def _start_live_watch(
 
     from shared.models.base import SessionLocal
     from shared.models.watch_sessions import WatchSession
+    from sqlalchemy import desc
 
     now = datetime.now(tz=timezone.utc)
-    expires_at = now + timedelta(minutes=duration_minutes)
 
     with SessionLocal() as session:
+        # First force-expire any stale sessions the worker missed
+        stale = (
+            session.query(WatchSession)
+            .filter(
+                WatchSession.status == "active",
+                WatchSession.expires_at <= now,
+            )
+            .all()
+        )
+        for s in stale:
+            s.status = "expired"
+            s.ended_at = now
+        if stale:
+            session.commit()
+
+        # Reject duplicate — one active session at a time
+        existing = (
+            session.query(WatchSession)
+            .filter(
+                WatchSession.status == "active",
+                WatchSession.expires_at > now,
+            )
+            .order_by(desc(WatchSession.created_at))
+            .first()
+        )
+        if existing is not None:
+            remaining = max(0, int((existing.expires_at - now).total_seconds()))
+            return {
+                "error": "already_active",
+                "session_id": existing.id,
+                "focus": existing.focus,
+                "remaining_seconds": remaining,
+                "expires_at_iso": existing.expires_at.isoformat(),
+                "message": (
+                    f"Watch #{existing.id} already active ({existing.focus}, "
+                    f"{remaining}s remaining). Stop it first with stop_live_watch, "
+                    f"or wait for it to expire."
+                ),
+            }
+
+        expires_at = now + timedelta(minutes=duration_minutes)
         watch = WatchSession(
             created_at=now,
             expires_at=expires_at,
@@ -176,17 +217,36 @@ def _get_active_watch() -> dict:
     from shared.models.watch_sessions import WatchSession
     from sqlalchemy import desc
 
+    now = datetime.now(tz=timezone.utc)
+
     with SessionLocal() as session:
+        # Belt-and-suspenders: force-expire any stale rows the worker missed
+        stale = (
+            session.query(WatchSession)
+            .filter(
+                WatchSession.status == "active",
+                WatchSession.expires_at <= now,
+            )
+            .all()
+        )
+        for s in stale:
+            s.status = "expired"
+            s.ended_at = now
+        if stale:
+            session.commit()
+
         row = (
             session.query(WatchSession)
-            .filter(WatchSession.status == "active")
+            .filter(
+                WatchSession.status == "active",
+                WatchSession.expires_at > now,
+            )
             .order_by(desc(WatchSession.created_at))
             .first()
         )
         if row is None:
             return {"active": False, "session": None}
 
-        now = datetime.now(tz=timezone.utc)
         remaining_seconds = max(0, int((row.expires_at - now).total_seconds()))
 
         return {
