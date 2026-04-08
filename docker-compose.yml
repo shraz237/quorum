@@ -6,7 +6,9 @@ services:
       POSTGRES_PASSWORD: trading
       POSTGRES_DB: trading
     ports:
-      - "127.0.0.1:5432:5432"
+      # Mapped to 5433 on host because the user already has a local postgres
+      # listening on 5432. To psql in: psql -h 127.0.0.1 -p 5433 -U trading
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,8 +19,8 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "127.0.0.1:6379:6379"
+    # No host port mapping — redis is only used internally by other services
+    # in the docker network. (Avoids conflict with any local redis-server.)
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -125,7 +127,9 @@ services:
       context: .
       dockerfile: services/dashboard/Dockerfile
     ports:
-      - "127.0.0.1:8000:8000"
+      # Mapped to 8001 because user has another Python service on 8000.
+      # Dashboard URL: http://127.0.0.1:8001
+      - "127.0.0.1:8001:8000"
     depends_on:
       docker-proxy:
         condition: service_started
