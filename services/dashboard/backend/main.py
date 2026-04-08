@@ -296,6 +296,56 @@ def get_signal_confluence_endpoint() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@app.get("/api/scenario-calculator")
+def get_scenario_calculator_endpoint() -> dict[str, Any]:
+    """Return PnL/equity/margin snapshots at multiple price levels + key levels."""
+    try:
+        from plugin_risk_tools import compute_scenarios
+        return {"data": compute_scenarios()}
+    except Exception as exc:
+        logger.exception("scenario calculator failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/monte-carlo")
+def get_monte_carlo_endpoint(
+    horizon_hours: int = Query(default=24, ge=1, le=168),
+    n_paths: int = Query(default=2000, ge=100, le=10000),
+) -> dict[str, Any]:
+    """Return GBM Monte Carlo simulation of margin-call probability."""
+    try:
+        from plugin_risk_tools import simulate_margin_call
+        return {"data": simulate_margin_call(horizon_hours=horizon_hours, n_paths=n_paths)}
+    except Exception as exc:
+        logger.exception("monte carlo failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/upcoming-events")
+def get_upcoming_events_endpoint(days: int = Query(default=7, ge=1, le=30)) -> dict[str, Any]:
+    """Return upcoming economic events relevant to oil."""
+    try:
+        from plugin_analytics import _get_upcoming_events
+        return {"data": _get_upcoming_events(days=days)}
+    except Exception as exc:
+        logger.exception("upcoming events failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/vwap")
+def get_vwap_endpoint(
+    timeframe: str = Query(default="1H"),
+    hours: int = Query(default=24, ge=1, le=168),
+) -> dict[str, Any]:
+    """Return VWAP for a given timeframe/lookback."""
+    try:
+        from plugin_analytics import _get_vwap
+        return {"data": _get_vwap(timeframe=timeframe, hours=hours)}
+    except Exception as exc:
+        logger.exception("vwap failed")
+        return {"error": str(exc)}
+
+
 @app.get("/api/anomalies")
 def get_anomalies_endpoint(hours: int = Query(default=24, ge=1, le=168)) -> dict[str, Any]:
     """Return currently-active extreme anomalies and recent history."""
