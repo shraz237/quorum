@@ -9,6 +9,7 @@ import MarketfeedPanel from "./components/MarketfeedPanel";
 import ChatPanel from "./components/ChatPanel";
 import AccountPanel from "./components/AccountPanel";
 import CampaignsPanel from "./components/CampaignsPanel";
+import BinanceMetricsPanel from "./components/BinanceMetricsPanel";
 
 // ---------------------------------------------------------------------------
 // Types matching the backend JSON
@@ -185,6 +186,9 @@ const App: React.FC = () => {
 
       {/* Account Panel */}
       <AccountPanel />
+
+      {/* Binance Derivatives Metrics — funding, OI, L/S ratios, liquidations */}
+      <BinanceMetricsPanel />
 
       {/* Score Gauges */}
       <section className="mb-6">

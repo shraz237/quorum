@@ -263,6 +263,174 @@ def get_account_endpoint() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+# ---------------------------------------------------------------------------
+# Binance derived metrics endpoints
+# ---------------------------------------------------------------------------
+
+from shared.models.binance_metrics import (
+    BinanceFundingRate,
+    BinanceOpenInterest,
+    BinanceLongShortRatio,
+    BinanceLiquidation,
+)
+
+
+def _symbol() -> str:
+    return (settings.binance_symbol or "CLUSDT").upper()
+
+
+@app.get("/api/funding-rate")
+def get_funding_rate(hours: int = Query(default=168, ge=1, le=24 * 30)) -> dict[str, Any]:
+    """Historical funding rates for the configured perpetual. Default 7 days."""
+    since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    with SessionLocal() as session:
+        rows = (
+            session.query(BinanceFundingRate)
+            .filter(
+                BinanceFundingRate.symbol == _symbol(),
+                BinanceFundingRate.funding_time >= since,
+            )
+            .order_by(BinanceFundingRate.funding_time.asc())
+            .all()
+        )
+    series = [
+        {
+            "time": int(r.funding_time.timestamp()),
+            "rate": r.funding_rate,
+            "rate_pct": round(r.funding_rate * 100, 4),
+            "mark_price": r.mark_price,
+        }
+        for r in rows
+    ]
+    latest = series[-1] if series else None
+    return {"data": {"symbol": _symbol(), "latest": latest, "series": series}}
+
+
+@app.get("/api/open-interest")
+def get_open_interest(hours: int = Query(default=24, ge=1, le=24 * 30)) -> dict[str, Any]:
+    """Open-interest history. Default 24h."""
+    since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    with SessionLocal() as session:
+        rows = (
+            session.query(BinanceOpenInterest)
+            .filter(
+                BinanceOpenInterest.symbol == _symbol(),
+                BinanceOpenInterest.timestamp >= since,
+            )
+            .order_by(BinanceOpenInterest.timestamp.asc())
+            .all()
+        )
+    series = [
+        {
+            "time": int(r.timestamp.timestamp()),
+            "open_interest": r.open_interest,
+            "open_interest_value_usd": r.open_interest_value_usd,
+        }
+        for r in rows
+    ]
+    latest = series[-1] if series else None
+    prev = series[0] if series else None
+    change_pct = None
+    if latest and prev and prev["open_interest"]:
+        change_pct = round(
+            (latest["open_interest"] - prev["open_interest"]) / prev["open_interest"] * 100,
+            2,
+        )
+    return {
+        "data": {
+            "symbol": _symbol(),
+            "latest": latest,
+            "change_pct_over_window": change_pct,
+            "series": series,
+        }
+    }
+
+
+@app.get("/api/long-short-ratio")
+def get_long_short_ratio(hours: int = Query(default=24, ge=1, le=24 * 30)) -> dict[str, Any]:
+    """Long/short positioning ratios: top traders, global accounts, taker flow."""
+    since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    with SessionLocal() as session:
+        rows = (
+            session.query(BinanceLongShortRatio)
+            .filter(
+                BinanceLongShortRatio.symbol == _symbol(),
+                BinanceLongShortRatio.timestamp >= since,
+            )
+            .order_by(BinanceLongShortRatio.timestamp.asc())
+            .all()
+        )
+    buckets: dict[str, list] = {"top_position": [], "global_account": [], "taker": []}
+    for r in rows:
+        buckets.setdefault(r.ratio_type, []).append({
+            "time": int(r.timestamp.timestamp()),
+            "long_pct": r.long_pct,
+            "short_pct": r.short_pct,
+            "ratio": r.long_short_ratio,
+            "buy_volume": r.buy_volume,
+            "sell_volume": r.sell_volume,
+        })
+
+    def _latest(series: list) -> dict | None:
+        return series[-1] if series else None
+
+    return {
+        "data": {
+            "symbol": _symbol(),
+            "latest": {
+                "top_position": _latest(buckets["top_position"]),
+                "global_account": _latest(buckets["global_account"]),
+                "taker": _latest(buckets["taker"]),
+            },
+            "series": buckets,
+        }
+    }
+
+
+@app.get("/api/liquidations")
+def get_liquidations(
+    hours: int = Query(default=24, ge=1, le=24 * 7),
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> dict[str, Any]:
+    """Recent force-liquidation events."""
+    since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    with SessionLocal() as session:
+        rows = (
+            session.query(BinanceLiquidation)
+            .filter(
+                BinanceLiquidation.symbol == _symbol(),
+                BinanceLiquidation.timestamp >= since,
+            )
+            .order_by(BinanceLiquidation.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
+    events = [
+        {
+            "time": int(r.timestamp.timestamp()),
+            "side": r.side,
+            "price": r.price,
+            "executed_qty": r.executed_qty,
+            "quote_qty_usd": r.quote_qty_usd,
+            "order_status": r.order_status,
+        }
+        for r in rows
+    ]
+    # Aggregate stats for the window
+    buy_usd = sum(e["quote_qty_usd"] or 0 for e in events if e["side"] == "BUY")
+    sell_usd = sum(e["quote_qty_usd"] or 0 for e in events if e["side"] == "SELL")
+    return {
+        "data": {
+            "symbol": _symbol(),
+            "window_hours": hours,
+            "count": len(events),
+            "buy_volume_usd": round(buy_usd, 2),   # shorts liquidated
+            "sell_volume_usd": round(sell_usd, 2),  # longs liquidated
+            "events": events,
+        }
+    }
+
+
 @app.get("/api/campaigns")
 def get_campaigns_endpoint(
     status: str | None = Query(default="open"),

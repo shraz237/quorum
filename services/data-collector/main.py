@@ -38,6 +38,11 @@ def main() -> None:
     # Import collectors after DB is initialised (avoids import-time DB calls)
     from collectors.binance import collect_and_store as bn_collect
     from collectors.binance_ws import start_binance_ws
+    from collectors.binance_metrics import (
+        collect_all_metrics as bn_metrics_all,
+        collect_funding_rate as bn_funding,
+    )
+    from collectors.binance_liquidations_ws import start_liquidations_ws
     from collectors.shipping import collect_and_store as shipping_collect
     from collectors.portwatch import collect_and_store as portwatch_collect
     from collectors.cot import collect_and_store as cot_collect
@@ -80,6 +85,21 @@ def main() -> None:
     # WebSocket live stream — subscribes to kline_1m for real-time tick updates.
     # Runs in a daemon background thread, not on the scheduler.
     start_binance_ws()
+    start_liquidations_ws()
+
+    # --- Binance derived metrics (OI, funding, long/short, taker flow) ---
+    # Fast-cadence metrics: every 5 min.
+    scheduler.add_job(
+        safe_run, "interval", minutes=5, args=[bn_metrics_all],
+        id="binance_metrics", name="Binance derived metrics (OI/LSR/taker)",
+        max_instances=1, coalesce=True,
+    )
+    # Funding rate: rarely changes (8h exchange cadence), poll every 30 min.
+    scheduler.add_job(
+        safe_run, "interval", minutes=30, args=[bn_funding, 500],
+        id="binance_funding", name="Binance funding rate history",
+        max_instances=1, coalesce=True,
+    )
 
     # --- Yahoo Finance DISABLED — replaced by Binance CLUSDT (better data) ---
     # collectors/yahoo.py kept in repo as reference only. See commit that
@@ -133,6 +153,11 @@ def main() -> None:
     safe_run(bn_collect, "4h", 500)
     safe_run(bn_collect, "1d", 500)
     safe_run(bn_collect, "1w", 200)
+
+    # Warm up Binance derived metrics
+    logger.info("Warming up Binance metrics (OI, LSR, taker, funding) …")
+    safe_run(bn_funding, 500)
+    safe_run(bn_metrics_all)
 
     # Warm up macro / shipping collectors so the analyzer has fundamental
     # and shipping data on first cycle (instead of waiting hours).

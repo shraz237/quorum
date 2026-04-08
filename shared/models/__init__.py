@@ -11,6 +11,12 @@ from shared.models.account import Account
 from shared.models.campaigns import Campaign
 from shared.models.facts import Fact
 from shared.models.watch_sessions import WatchSession
+from shared.models.binance_metrics import (
+    BinanceFundingRate,
+    BinanceOpenInterest,
+    BinanceLongShortRatio,
+    BinanceLiquidation,
+)
 
 __all__ = [
     "Base",
@@ -35,4 +41,8 @@ __all__ = [
     "Campaign",
     "Fact",
     "WatchSession",
+    "BinanceFundingRate",
+    "BinanceOpenInterest",
+    "BinanceLongShortRatio",
+    "BinanceLiquidation",
 ]

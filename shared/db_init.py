@@ -31,6 +31,9 @@ _HYPERTABLES: list[str] = [
     "ai_recommendations",
     "shipping_positions",
     "shipping_metrics",
+    "binance_liquidations",
+    "binance_open_interest",
+    "binance_long_short_ratios",
 ]
 
 # Compression policy: compress chunks older than this many days.
