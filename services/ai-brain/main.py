@@ -494,6 +494,11 @@ def main() -> None:
     # Start the breaking-news watcher in a background thread
     threading.Thread(target=_knowledge_consumer, daemon=True, name="knowledge-watcher").start()
 
+    # Start the live watch worker in a background thread
+    from live_watch_worker import run_worker_loop as _live_watch_loop
+    threading.Thread(target=_live_watch_loop, daemon=True, name="live-watch").start()
+    logger.info("Live Watch worker thread started")
+
     for msg_id, data in subscribe(STREAM_IN, group=GROUP, consumer=CONSUMER, block=10_000):
         logger.info("Received scores event %s", msg_id)
         try:

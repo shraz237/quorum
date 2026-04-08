@@ -208,6 +208,86 @@ _ALERT_KIND_ICONS = {
 }
 
 
+def format_live_watch_update(evt: dict) -> str | None:
+    """Format a live_watch_update event into a Telegram message."""
+    if str(evt.get("type", "")) != "live_watch_update":
+        return None
+
+    tick = evt.get("tick_number", 0)
+    focus = evt.get("focus", "EITHER")
+    remaining = evt.get("remaining_seconds", 0)
+    rem_min = remaining // 60
+    rem_sec = remaining % 60
+    final = evt.get("final", False)
+
+    icon = "\U0001f3c1" if final else "\U0001f4e1"  # checkered flag / satellite
+
+    lines = [
+        f"{icon} *LIVE WATCH — {focus}* (tick {tick})",
+    ]
+    if not final:
+        lines.append(f"_\u23f1 {rem_min}m {rem_sec}s remaining_")
+    else:
+        lines.append("_Session ended_")
+    lines.append("\u2501" * 26)
+
+    # Price
+    price = evt.get("current_price")
+    price_delta = evt.get("price_delta")
+    price_delta_pct = evt.get("price_delta_pct")
+    if price is not None:
+        if price_delta is not None:
+            arrow = "\u2197" if price_delta >= 0 else "\u2198"
+            sign = "+" if price_delta >= 0 else ""
+            lines.append(
+                f"\U0001f4b5 Price: *${price:.2f}* {arrow} {sign}{price_delta:.2f} ({sign}{price_delta_pct:.2f}%)"
+            )
+        else:
+            lines.append(f"\U0001f4b5 Price: *${price:.2f}*")
+
+    # Scores
+    scores = evt.get("scores") or {}
+    if scores:
+        t = scores.get("technical")
+        f = scores.get("fundamental")
+        s = scores.get("sentiment")
+        u = scores.get("unified")
+        lines.append(
+            f"\U0001f4ca T:{t:+.0f} \u00b7 F:{f:+.0f} \u00b7 S:{s:+.0f} \u00b7 U:*{u:+.0f}*"
+            if all(x is not None for x in (t, f, s, u))
+            else "\U0001f4ca scores pending\u2026"
+        )
+
+    score_delta = evt.get("score_delta")
+    if score_delta is not None and abs(score_delta) >= 0.5:
+        sign = "+" if score_delta >= 0 else ""
+        lines.append(f"  \u0394unified: {sign}{score_delta:.1f}")
+
+    # Recent knowledge
+    knowledge = evt.get("recent_knowledge") or []
+    if knowledge:
+        lines.append("")
+        lines.append("\U0001f4f0 *Recent News*")
+        for k in knowledge[:2]:
+            label = k.get("sentiment_label", "?")
+            score = k.get("sentiment_score") or 0
+            emoji = "\U0001f7e2" if label == "bullish" else "\U0001f534" if label == "bearish" else "\U0001f7e1"
+            summary = (k.get("summary") or "")[:150]
+            lines.append(f"  {emoji} ({score:+.2f}) {summary}")
+
+    # Verdict
+    lines.append("")
+    verdict = evt.get("verdict") or {}
+    action = verdict.get("action", "?")
+    conf = verdict.get("confidence", 0)
+    summary = verdict.get("summary", "")
+    lines.append(f"\U0001f3af *Verdict: {action}* (conf {conf:.0%})")
+    if summary:
+        lines.append(f"   _{summary}_")
+
+    return "\n".join(lines)
+
+
 def format_alert_triggered(evt: dict) -> str | None:
     """Format an alert.triggered event into a Telegram message."""
     if str(evt.get("type", "")) != "alert_triggered":

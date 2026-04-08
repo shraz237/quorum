@@ -29,6 +29,7 @@ from shared.redis_streams import subscribe
 
 from formatter import (
     format_alert_triggered,
+    format_live_watch_update,
     format_marketfeed_digest,
     format_position_event,
     format_signal_alert,
@@ -46,6 +47,7 @@ STREAM_SIGNAL = "signal.recommendation"
 STREAM_POSITION = "position.event"
 STREAM_KNOWLEDGE = "knowledge.summary"
 STREAM_ALERT = "alert.triggered"
+STREAM_LIVE_WATCH = "live_watch.update"
 GROUP = "notifier"
 
 # Telegram message size hard cap is 4096 chars; leave headroom for markdown.
@@ -274,6 +276,101 @@ async def _cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ---------------------------------------------------------------------------
+# Live watch consumer (edits a single Telegram message in place per session)
+# ---------------------------------------------------------------------------
+
+async def _consume_live_watch(bot) -> None:
+    """Special consumer that edits a single pinned Telegram message per watch session."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _reader() -> None:
+        backoff = 1.0
+        while True:
+            try:
+                for msg_id, data in subscribe(
+                    STREAM_LIVE_WATCH, group=GROUP, consumer="notifier-livewatch", block=10_000
+                ):
+                    asyncio.run_coroutine_threadsafe(queue.put((msg_id, data)), loop)
+                    backoff = 1.0
+            except Exception:
+                logger.exception("Live-watch reader crashed, retrying in %.1fs", backoff)
+                import time as _t
+                _t.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+
+    threading.Thread(target=_reader, daemon=True, name="reader-live-watch").start()
+
+    allowed_chat = _allowed_chat_id()
+    if allowed_chat is None:
+        logger.warning("No allowed chat — live watch disabled")
+        return
+
+    while True:
+        msg_id, data = await queue.get()
+        session_id = data.get("session_id")
+        if not session_id:
+            continue
+
+        text = format_live_watch_update(data)
+        if not text:
+            continue
+        if len(text) > TELEGRAM_CHUNK:
+            text = text[:TELEGRAM_CHUNK - 20] + "\n\u2026(truncated)"
+
+        # Read / set telegram_message_id via DB
+        try:
+            from shared.models.base import SessionLocal
+            from shared.models.watch_sessions import WatchSession
+        except Exception:
+            logger.exception("Failed to import WatchSession")
+            continue
+
+        try:
+            with SessionLocal() as session:
+                row = session.get(WatchSession, session_id)
+                existing_msg_id = row.telegram_message_id if row else None
+
+            if existing_msg_id is None:
+                # Send a new message and save its id
+                sent = await bot.send_message(
+                    chat_id=allowed_chat, text=text, parse_mode=ParseMode.MARKDOWN,
+                )
+                with SessionLocal() as session:
+                    row = session.get(WatchSession, session_id)
+                    if row:
+                        row.telegram_chat_id = allowed_chat
+                        row.telegram_message_id = sent.message_id
+                        session.commit()
+            else:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=allowed_chat,
+                        message_id=existing_msg_id,
+                        text=text,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception as exc:
+                    # Telegram rate limit / message too old — send a new one
+                    err_str = str(exc)
+                    if "message is not modified" in err_str:
+                        pass  # no-op
+                    elif "too old" in err_str.lower() or "bad request" in err_str.lower():
+                        sent = await bot.send_message(
+                            chat_id=allowed_chat, text=text, parse_mode=ParseMode.MARKDOWN,
+                        )
+                        with SessionLocal() as session:
+                            row = session.get(WatchSession, session_id)
+                            if row:
+                                row.telegram_message_id = sent.message_id
+                                session.commit()
+                    else:
+                        logger.exception("Edit failed")
+        except Exception:
+            logger.exception("live_watch dispatch failed for session %s", session_id)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -320,6 +417,7 @@ async def main_async() -> None:
             _consume_stream(STREAM_POSITION, "notifier-position", format_position_event, bot),
             _consume_stream(STREAM_KNOWLEDGE, "notifier-knowledge", format_marketfeed_digest, bot),
             _consume_stream(STREAM_ALERT, "notifier-alerts", format_alert_triggered, bot),
+            _consume_live_watch(bot),
         )
     finally:
         await application.updater.stop()
