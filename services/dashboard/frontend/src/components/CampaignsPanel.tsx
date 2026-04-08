@@ -14,6 +14,17 @@ interface CampaignPosition {
   opened_at: string;
 }
 
+interface DcaPreviewRow {
+  offset_pct: number;
+  trigger_price: number;
+  added_lots: number;
+  added_margin: number;
+  new_total_lots: number;
+  new_avg_entry: number;
+  new_total_margin: number;
+  new_breakeven: number;
+}
+
 interface Campaign {
   id: number;
   side: "LONG" | "SHORT";
@@ -32,6 +43,7 @@ interface Campaign {
   unrealised_pnl_pct: number;
   max_loss_pct: number;
   positions: CampaignPosition[];
+  dca_preview?: DcaPreviewRow[];
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +326,82 @@ const CampaignCard: React.FC<CampaignCardProps> = ({ campaign, onRefetch }) => {
             pnlPct={c.unrealised_pnl_pct}
             maxLossPct={c.max_loss_pct}
           />
+
+          {/* Next DCA Preview — simulated outcomes at several price levels */}
+          {c.dca_preview && c.dca_preview.length > 0 && (
+            <div>
+              <div className="flex items-baseline justify-between mb-1">
+                <span className="text-[10px] uppercase tracking-widest text-gray-500">
+                  Next DCA Layer Preview (+${c.next_layer_margin?.toFixed(0)} margin)
+                </span>
+                <span className="text-[10px] text-gray-600">
+                  simulated outcomes
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="text-gray-500 border-b border-gray-800">
+                      <th className="text-left py-1 pr-3">Trigger</th>
+                      <th className="text-right py-1 pr-3">+ Lots</th>
+                      <th className="text-right py-1 pr-3">New Total Lots</th>
+                      <th className="text-right py-1 pr-3">New Avg</th>
+                      <th className="text-right py-1 pr-3">New Margin</th>
+                      <th className="text-right py-1">Breakeven</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {c.dca_preview.map((row, i) => {
+                      const isCurrent = row.offset_pct === 0;
+                      return (
+                        <tr
+                          key={i}
+                          className={`border-b border-gray-900 last:border-0 ${
+                            isCurrent ? "bg-gray-800/40" : ""
+                          }`}
+                        >
+                          <td className="py-1 pr-3">
+                            <span className={`font-semibold ${
+                              row.offset_pct === 0
+                                ? "text-blue-300"
+                                : "text-gray-300"
+                            }`}>
+                              {fmtPrice(row.trigger_price)}
+                            </span>{" "}
+                            <span className="text-[10px] text-gray-600">
+                              {row.offset_pct === 0
+                                ? "now"
+                                : (row.offset_pct > 0 ? "+" : "") + row.offset_pct + "%"}
+                            </span>
+                          </td>
+                          <td className="py-1 pr-3 text-right text-gray-400">
+                            {row.added_lots.toFixed(3)}
+                          </td>
+                          <td className="py-1 pr-3 text-right text-gray-200 font-medium">
+                            {row.new_total_lots.toFixed(3)}
+                          </td>
+                          <td className="py-1 pr-3 text-right text-gray-100 font-semibold">
+                            {fmtPrice(row.new_avg_entry)}
+                          </td>
+                          <td className="py-1 pr-3 text-right text-gray-300">
+                            {fmtUsd(row.new_total_margin)}
+                          </td>
+                          <td className="py-1 text-right text-yellow-400">
+                            {fmtPrice(row.new_breakeven)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="text-[10px] text-gray-600 mt-1">
+                {c.side === "LONG"
+                  ? "Dips (negative offsets) improve your avg entry and lower breakeven"
+                  : "Rallies (positive offsets) improve your avg entry and raise breakeven"}
+              </div>
+            </div>
+          )}
 
           {/* DCA layer table */}
           {c.positions.length > 0 && (

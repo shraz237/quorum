@@ -10,6 +10,8 @@ import ChatPanel from "./components/ChatPanel";
 import AccountPanel from "./components/AccountPanel";
 import CampaignsPanel from "./components/CampaignsPanel";
 import BinanceMetricsPanel from "./components/BinanceMetricsPanel";
+import BinanceProPanel from "./components/BinanceProPanel";
+import ConvictionMeter from "./components/ConvictionMeter";
 
 // ---------------------------------------------------------------------------
 // Types matching the backend JSON
@@ -187,8 +189,16 @@ const App: React.FC = () => {
       {/* Account Panel */}
       <AccountPanel />
 
+      {/* Conviction Meter — composite decision support (own row) */}
+      <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-3">
+        <ConvictionMeter />
+      </div>
+
       {/* Binance Derivatives Metrics — funding, OI, L/S ratios, liquidations */}
       <BinanceMetricsPanel />
+
+      {/* Binance Pro — orderbook, whale trades, volume profile */}
+      <BinanceProPanel />
 
       {/* Analysis Scores — full-width row of 5 bipolar score cards */}
       <AnalysisScoresPanel scores={score as any} loading={scoreLoading} />

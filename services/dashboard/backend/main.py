@@ -263,6 +263,17 @@ def get_account_endpoint() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@app.get("/api/conviction")
+def get_conviction_endpoint() -> dict[str, Any]:
+    """Return the composite conviction reading (0..100 + direction + drivers)."""
+    try:
+        from plugin_conviction import compute_conviction
+        return {"data": compute_conviction()}
+    except Exception as exc:
+        logger.exception("get_conviction_endpoint failed")
+        return {"error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Binance derived metrics endpoints
 # ---------------------------------------------------------------------------
@@ -383,6 +394,198 @@ def get_long_short_ratio(hours: int = Query(default=24, ge=1, le=24 * 30)) -> di
                 "taker": _latest(buckets["taker"]),
             },
             "series": buckets,
+        }
+    }
+
+
+@app.get("/api/orderbook")
+def get_orderbook(depth: int = Query(default=100, ge=5, le=500)) -> dict[str, Any]:
+    """Proxy Binance CLUSDT depth snapshot with bid/ask wall aggregation."""
+    import requests
+    try:
+        r = requests.get(
+            "https://fapi.binance.com/fapi/v1/depth",
+            params={"symbol": _symbol(), "limit": depth},
+            timeout=10,
+        )
+        r.raise_for_status()
+        raw = r.json()
+    except Exception as exc:
+        logger.exception("orderbook proxy failed")
+        return {"error": str(exc)}
+
+    bids = [(float(p), float(q)) for p, q in raw.get("bids", [])]
+    asks = [(float(p), float(q)) for p, q in raw.get("asks", [])]
+    best_bid = bids[0][0] if bids else None
+    best_ask = asks[0][0] if asks else None
+    mid = (best_bid + best_ask) / 2 if best_bid and best_ask else None
+    spread = (best_ask - best_bid) if best_bid and best_ask else None
+
+    total_bid_vol = sum(q for _, q in bids)
+    total_ask_vol = sum(q for _, q in asks)
+    imbalance = (
+        (total_bid_vol - total_ask_vol) / (total_bid_vol + total_ask_vol)
+        if (total_bid_vol + total_ask_vol) > 0
+        else 0.0
+    )
+
+    return {
+        "data": {
+            "symbol": _symbol(),
+            "mid": mid,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "total_bid_volume": round(total_bid_vol, 2),
+            "total_ask_volume": round(total_ask_vol, 2),
+            "imbalance": round(imbalance, 4),
+            "bids": [{"price": p, "qty": q} for p, q in bids],
+            "asks": [{"price": p, "qty": q} for p, q in asks],
+            "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+    }
+
+
+@app.get("/api/whale-trades")
+def get_whale_trades(
+    limit: int = Query(default=1000, ge=1, le=1000),
+    min_usd: float = Query(default=50_000, ge=1_000),
+) -> dict[str, Any]:
+    """Recent aggregated trades on CLUSDT, filtered to whales (>= min_usd)."""
+    import requests
+    try:
+        r = requests.get(
+            "https://fapi.binance.com/fapi/v1/aggTrades",
+            params={"symbol": _symbol(), "limit": limit},
+            timeout=10,
+        )
+        r.raise_for_status()
+        raw = r.json()
+    except Exception as exc:
+        logger.exception("whale trades fetch failed")
+        return {"error": str(exc)}
+
+    trades = []
+    buy_usd = 0.0
+    sell_usd = 0.0
+    for row in raw:
+        try:
+            price = float(row["p"])
+            qty = float(row["q"])
+            quote = price * qty
+            is_buyer_maker = bool(row.get("m", False))
+            side = "SELL" if is_buyer_maker else "BUY"
+            ts_ms = int(row["T"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if quote < min_usd:
+            continue
+        trades.append({
+            "time": ts_ms // 1000,
+            "price": price,
+            "qty": qty,
+            "quote_usd": round(quote, 2),
+            "side": side,
+        })
+        if side == "BUY":
+            buy_usd += quote
+        else:
+            sell_usd += quote
+
+    trades.sort(key=lambda t: t["time"], reverse=True)
+    return {
+        "data": {
+            "symbol": _symbol(),
+            "min_usd": min_usd,
+            "count": len(trades),
+            "buy_volume_usd": round(buy_usd, 2),
+            "sell_volume_usd": round(sell_usd, 2),
+            "delta_usd": round(buy_usd - sell_usd, 2),
+            "trades": trades[:100],  # cap to 100 most recent for payload size
+        }
+    }
+
+
+@app.get("/api/volume-profile")
+def get_volume_profile(
+    timeframe: str = Query(default="5min"),
+    hours: int = Query(default=24, ge=1, le=24 * 7),
+    buckets: int = Query(default=30, ge=10, le=100),
+) -> dict[str, Any]:
+    """Horizontal volume histogram computed from existing OHLCV rows."""
+    since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    with SessionLocal() as session:
+        rows = (
+            session.query(OHLCV)
+            .filter(
+                OHLCV.source == "binance",
+                OHLCV.timeframe == timeframe,
+                OHLCV.timestamp >= since,
+            )
+            .order_by(OHLCV.timestamp.asc())
+            .all()
+        )
+
+    if not rows:
+        return {"data": {"symbol": _symbol(), "buckets": [], "poc_price": None}}
+
+    prices = [(r.high + r.low + r.close) / 3 for r in rows]  # typical price
+    vols = [r.volume or 0.0 for r in rows]
+    p_min = min(prices)
+    p_max = max(prices)
+    if p_max <= p_min:
+        p_max = p_min + 0.01
+
+    bucket_size = (p_max - p_min) / buckets
+    hist = [0.0] * buckets
+    for typical, v in zip(prices, vols):
+        idx = min(buckets - 1, int((typical - p_min) / bucket_size))
+        hist[idx] += v
+
+    total_vol = sum(hist)
+    poc_idx = max(range(buckets), key=lambda i: hist[i])
+    poc_price = p_min + bucket_size * (poc_idx + 0.5)
+
+    # Value Area: smallest contiguous range of buckets around POC containing 70% vol
+    target = total_vol * 0.70
+    lo, hi = poc_idx, poc_idx
+    accum = hist[poc_idx]
+    while accum < target and (lo > 0 or hi < buckets - 1):
+        left = hist[lo - 1] if lo > 0 else -1
+        right = hist[hi + 1] if hi < buckets - 1 else -1
+        if left >= right:
+            if lo > 0:
+                lo -= 1
+                accum += hist[lo]
+            else:
+                hi += 1
+                accum += hist[hi]
+        else:
+            hi += 1
+            accum += hist[hi]
+
+    val_price = p_min + bucket_size * lo
+    vah_price = p_min + bucket_size * (hi + 1)
+
+    bucket_data = [
+        {
+            "price_lo": round(p_min + bucket_size * i, 3),
+            "price_hi": round(p_min + bucket_size * (i + 1), 3),
+            "volume": round(hist[i], 2),
+        }
+        for i in range(buckets)
+    ]
+
+    return {
+        "data": {
+            "symbol": _symbol(),
+            "timeframe": timeframe,
+            "hours": hours,
+            "total_volume": round(total_vol, 2),
+            "poc_price": round(poc_price, 3),
+            "value_area_low": round(val_price, 3),
+            "value_area_high": round(vah_price, 3),
+            "buckets": bucket_data,
         }
     }
 

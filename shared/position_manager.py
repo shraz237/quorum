@@ -310,6 +310,44 @@ def compute_campaign_state(campaign_id: int, current_price: float | None = None)
 
         positions_data = [_position_to_layer_dict(p, current_price) for p in open_pos]
 
+        # DCA preview: simulate adding the next layer at several price points.
+        # Shows the user what their new avg / total exposure / breakeven
+        # would be if they DCA'd here, or if they waited for a -1%, -2%,
+        # -3% move first. Only meaningful when there IS a next layer available.
+        dca_preview: list[dict] = []
+        if (
+            next_margin is not None
+            and current_price is not None
+            and avg_entry is not None
+            and total_lots > 0
+        ):
+            # For a LONG we DCA on dips (negative offsets); for a SHORT on rallies
+            # (positive offsets). Show a symmetric grid relative to trend.
+            offsets = (
+                [0.0, -0.005, -0.01, -0.02, -0.03]
+                if campaign.side == "LONG"
+                else [0.0, 0.005, 0.01, 0.02, 0.03]
+            )
+            for offset in offsets:
+                trigger_price = current_price * (1.0 + offset)
+                new_lots_at_layer = next_margin * 10 / (trigger_price * 100)  # 10x leverage, lot = 100 bbl
+                new_total_lots = total_lots + new_lots_at_layer
+                new_avg = (
+                    (avg_entry * total_lots) + (trigger_price * new_lots_at_layer)
+                ) / new_total_lots
+                new_total_margin = total_margin + next_margin
+                # Breakeven price = the new avg itself (ignoring fees)
+                dca_preview.append({
+                    "offset_pct": round(offset * 100, 2),
+                    "trigger_price": round(trigger_price, 3),
+                    "added_lots": round(new_lots_at_layer, 4),
+                    "added_margin": round(next_margin, 2),
+                    "new_total_lots": round(new_total_lots, 4),
+                    "new_avg_entry": round(new_avg, 3),
+                    "new_total_margin": round(new_total_margin, 2),
+                    "new_breakeven": round(new_avg, 3),
+                })
+
         return {
             "id": campaign.id,
             "side": campaign.side,
@@ -330,6 +368,7 @@ def compute_campaign_state(campaign_id: int, current_price: float | None = None)
             "realized_pnl": campaign.realized_pnl,
             "notes": campaign.notes,
             "positions": positions_data,
+            "dca_preview": dca_preview,
         }
 
 
