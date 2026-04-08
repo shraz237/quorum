@@ -37,12 +37,12 @@ Example: {{"score": 0.3, "narrative": "OPEC supply cut optimism driving bullish 
 
 
 def _get_current_price() -> float | None:
-    """Return the most recent Brent close (prefers Stooq ICE Brent)."""
+    """Return the most recent WTI close (Yahoo CL=F)."""
     try:
         with SessionLocal() as session:
             row = (
                 session.query(OHLCV)
-                .filter(OHLCV.timeframe == "1min", OHLCV.source == "stooq")
+                .filter(OHLCV.timeframe == "1min", OHLCV.source == "yahoo")
                 .order_by(desc(OHLCV.timestamp))
                 .first()
             )

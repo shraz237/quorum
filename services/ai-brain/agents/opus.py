@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 MODEL = "claude-opus-4-6"
 
 SYSTEM_PROMPT = (
-    "You are a senior oil market strategist with 20+ years of experience trading Brent crude oil. "
+    "You are a senior oil market strategist with 20+ years of experience trading WTI crude oil. "
     "Your role is to synthesise quantitative scores, qualitative analysis, and social-media sentiment "
     "into a clear, actionable trading recommendation. You also actively manage existing positions.\n\n"
     "IMPORTANT: All scores in this prompt are on a -100..+100 scale. "
@@ -48,7 +48,7 @@ FALLBACK_REC: dict = {
 
 RECOMMENDATION_TOOL = {
     "name": "submit_trading_recommendation",
-    "description": "Submit a trading recommendation for Brent crude oil based on the analysis",
+    "description": "Submit a trading recommendation for WTI crude oil based on the analysis",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -129,12 +129,12 @@ def parse_opus_response(text: str) -> dict:
 
 
 def _get_current_price() -> float | None:
-    """Return the most recent Brent close (prefers Stooq ICE Brent)."""
+    """Return the most recent WTI close (Yahoo CL=F)."""
     try:
         with SessionLocal() as session:
             row = (
                 session.query(OHLCV)
-                .filter(OHLCV.timeframe == "1min", OHLCV.source == "stooq")
+                .filter(OHLCV.timeframe == "1min", OHLCV.source == "yahoo")
                 .order_by(OHLCV.timestamp.desc())
                 .first()
             )
@@ -154,26 +154,17 @@ def _get_current_price() -> float | None:
 def get_market_snapshot() -> dict:
     """Return current market snapshot: latest price + recent OHLCV stats.
 
-    Prefers Stooq ICE Brent (matches XTB CFD price) over Yahoo BZ=F (NYMEX
-    Brent Last Day Financial, which can drift $0.30-$1.00 from ICE Brent).
+    Uses Yahoo CL=F (NYMEX WTI front-month) — real front-month future that
+    matches XTB OIL.WTI CFD virtually 1:1.
     """
     try:
         with SessionLocal() as session:
-            # Try Stooq ICE Brent first
             latest = (
                 session.query(OHLCV)
-                .filter(OHLCV.timeframe == "1min", OHLCV.source == "stooq")
+                .filter(OHLCV.timeframe == "1min", OHLCV.source == "yahoo")
                 .order_by(OHLCV.timestamp.desc())
                 .first()
             )
-            # Fall back to Yahoo if Stooq has no recent data
-            if latest is None:
-                latest = (
-                    session.query(OHLCV)
-                    .filter(OHLCV.timeframe == "1min")
-                    .order_by(OHLCV.timestamp.desc())
-                    .first()
-                )
             if latest is None:
                 return {}
 
@@ -404,7 +395,7 @@ def synthesize_recommendation(
 
     user_prompt = (
         f"{breaking_block}"
-        f"## Current Brent Crude Market Snapshot (USE THESE EXACT PRICES)\n{market_text}\n\n"
+        f"## Current WTI Crude Market Snapshot (USE THESE EXACT PRICES)\n{market_text}\n\n"
         f"{positions_block}"
         f"## Knowledge Base — Recent @marketfeed Digests (newest first)\n{knowledge_text}\n\n"
         f"## Quantitative Scores\n{scores_text}\n\n"

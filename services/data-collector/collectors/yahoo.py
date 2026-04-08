@@ -1,4 +1,9 @@
-"""Yahoo Finance collector for Brent crude oil (BZ=F) OHLCV data."""
+"""Yahoo Finance collector for WTI crude oil (CL=F) OHLCV data.
+
+CL=F is the real NYMEX WTI front-month future — matches XTB OIL.WTI CFD
+virtually 1:1 (no drift). We switched from BZ=F (Brent NYMEX BLDF) because
+that was a derivative contract that drifted $0.30-$1.00 from ICE Brent.
+"""
 
 from __future__ import annotations
 
@@ -25,12 +30,12 @@ INTERVAL_MAP: dict[str, str] = {
     "1wk": "1W",
 }
 
-_TICKER = "BZ=F"
-_STREAM = "prices.brent"
+_TICKER = "CL=F"
+_STREAM = "prices.brent"  # legacy stream name, kept for backward-compat (carries WTI now)
 
 
 def fetch_brent_ohlcv(interval: str = "1h", period: str = "1d") -> list[dict]:
-    """Download BZ=F OHLCV bars from Yahoo Finance.
+    """Download CL=F (WTI front-month) OHLCV bars from Yahoo Finance.
 
     Args:
         interval: yfinance interval string (e.g. "1m", "1h", "1d").

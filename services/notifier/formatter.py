@@ -60,7 +60,7 @@ def format_signal_alert(rec: dict) -> str:
     timestamp = rec.get("timestamp", "")
 
     lines = [
-        f"{emoji} *Brent Crude Signal: {action}*",
+        f"{emoji} *WTI Crude Signal: {action}*",
         f"Score: {score_str} | Confidence: {confidence_str}",
         "",
     ]
@@ -305,7 +305,7 @@ def format_alert_triggered(evt: dict) -> str | None:
     ]
 
     if kind == "price" and triggered_value is not None:
-        lines.append(f"Brent price: *${triggered_value:.2f}*")
+        lines.append(f"WTI price: *${triggered_value:.2f}*")
     elif kind == "score" and triggered_value is not None:
         lines.append(f"Score value: *{triggered_value:+.1f}*")
     elif kind == "keyword" and match_info:

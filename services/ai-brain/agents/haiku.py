@@ -18,12 +18,12 @@ FALLBACK = "Unable to generate Haiku summary at this time."
 
 
 def _get_current_price() -> float | None:
-    """Return the most recent Brent close (prefers Stooq ICE Brent)."""
+    """Return the most recent WTI close (Yahoo CL=F)."""
     try:
         with SessionLocal() as session:
             row = (
                 session.query(OHLCV)
-                .filter(OHLCV.timeframe == "1min", OHLCV.source == "stooq")
+                .filter(OHLCV.timeframe == "1min", OHLCV.source == "yahoo")
                 .order_by(desc(OHLCV.timestamp))
                 .first()
             )
@@ -65,19 +65,19 @@ def summarize_scores(scores: dict) -> str:
         f"  {k}: {v}" for k, v in scores.items()
     )
     price_anchor = (
-        f"FACT — current Brent (ICE) price is ${current_price:.2f}. "
+        f"FACT — current WTI (NYMEX) price is ${current_price:.2f}. "
         f"Use ONLY this price level if you reference any number — do not invent prices.\n\n"
     )
     prompt = (
         f"{price_anchor}"
-        "You are a Brent crude oil market analyst assistant. "
+        "You are a WTI crude oil market analyst assistant. "
         "Below are composite analysis scores on a -100..+100 scale "
         "(scale: -100 = extreme bearish, 0 = neutral, +100 = extreme bullish). "
         "Interpret values correctly: e.g. 38.5 means moderately bullish (38/100), "
         "NOT near-neutral.\n\n"
         f"{scores_text}\n\n"
         "Write a concise 3-4 sentence summary covering the technical, fundamental, "
-        "and sentiment outlook for Brent crude oil based on these scores. "
+        "and sentiment outlook for WTI crude oil based on these scores. "
         "Be direct and factual."
     )
 

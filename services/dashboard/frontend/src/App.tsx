@@ -157,7 +157,7 @@ const App: React.FC = () => {
       <header className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-white tracking-tight">
-            Brent Crude Trading Dashboard
+            WTI Crude Trading Dashboard
           </h1>
           <p className="text-xs text-gray-500 mt-0.5">
             {lastUpdate

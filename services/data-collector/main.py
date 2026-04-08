@@ -37,7 +37,6 @@ def main() -> None:
 
     # Import collectors after DB is initialised (avoids import-time DB calls)
     from collectors.yahoo import collect_and_store as yf_collect
-    from collectors.stooq import collect_and_store as stooq_collect
     from collectors.shipping import collect_and_store as shipping_collect
     from collectors.portwatch import collect_and_store as portwatch_collect
     from collectors.cot import collect_and_store as cot_collect
@@ -106,12 +105,10 @@ def main() -> None:
         coalesce=True,
     )
 
-    # --- Stooq ICE Brent snapshot (matches XTB CFD price) ---
-    scheduler.add_job(
-        safe_run, "interval", minutes=1, args=[stooq_collect],
-        id="stooq_ice_brent", name="Stooq ICE Brent snapshot",
-        max_instances=1, coalesce=True,
-    )
+    # Stooq ICE Brent snapshot DISABLED — we switched to Yahoo CL=F (NYMEX WTI
+    # front-month) as single price source. Stooq only served CB.F flat-tick bars
+    # anyway; WTI CL=F has real OHLC historical depth from Yahoo. collectors/stooq.py
+    # kept in repo for reference.
 
     # --- Alpha Vantage jobs ---
     # DISABLED: Alpha Vantage TIME_SERIES_INTRADAY with symbol "BZ" returns
@@ -166,7 +163,6 @@ def main() -> None:
     safe_run(yf_collect, "1h", "5d")
     safe_run(yf_collect, "1d", "1mo")
     safe_run(yf_collect, "1wk", "2y")
-    safe_run(stooq_collect)  # warm up Stooq ICE Brent snapshot
 
     # Warm up macro / shipping collectors so the analyzer has fundamental
     # and shipping data on first cycle (instead of waiting hours).

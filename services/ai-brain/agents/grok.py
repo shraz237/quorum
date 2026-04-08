@@ -20,12 +20,12 @@ FALLBACK = "Unable to retrieve Grok narrative at this time."
 
 
 def _get_current_price() -> float | None:
-    """Return the most recent Brent close (prefers Stooq ICE Brent)."""
+    """Return the most recent WTI close (Yahoo CL=F)."""
     try:
         with SessionLocal() as session:
             row = (
                 session.query(OHLCV)
-                .filter(OHLCV.timeframe == "1min", OHLCV.source == "stooq")
+                .filter(OHLCV.timeframe == "1min", OHLCV.source == "yahoo")
                 .order_by(desc(OHLCV.timestamp))
                 .first()
             )
@@ -55,14 +55,14 @@ def _live_grok_call() -> str:
     )
 
     price_anchor = (
-        f"FACT — current Brent (ICE) price is ${current_price:.2f}. "
+        f"FACT — current WTI (NYMEX) price is ${current_price:.2f}. "
         f"Do NOT cite any other price level. Do not invent prices from your training data.\n\n"
     )
 
     prompt = (
         f"{price_anchor}"
         "You have real-time access to Twitter/X. "
-        "Describe the current Twitter/X narrative and sentiment around Brent crude oil. "
+        "Describe the current Twitter/X narrative and sentiment around WTI crude oil. "
         "What are traders, analysts, and news accounts saying right now about supply, "
         "demand, geopolitics, and OPEC? "
         "Summarise the dominant themes in 2-3 sentences. Be concise and factual. "

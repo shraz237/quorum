@@ -1,6 +1,6 @@
 """Adversarial trading committee: Bull vs Bear vs Judge.
 
-Two sub-agents (Claude Sonnet) argue opposite sides of the same Brent crude
+Two sub-agents (Claude Sonnet) argue opposite sides of the same WTI crude
 setup using the same pre-fetched market context. A judge (Claude Opus) then
 reads both cases and renders a final verdict with specific action and levels.
 

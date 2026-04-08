@@ -195,36 +195,25 @@ def get_ohlcv(
     timeframe: str = Query(default="1H"),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict[str, Any]:
-    """Return OHLCV bars suitable for Lightweight Charts (deduped, sorted ascending).
-
-    Multiple sources (Yahoo, Stooq) can publish bars with the same timeframe and
-    timestamp. Lightweight-charts requires UNIQUE monotonic times — we dedupe
-    by timestamp here, preferring Stooq (ICE Brent, more accurate) over Yahoo.
-    """
+    """Return OHLCV bars suitable for Lightweight Charts (Yahoo CL=F only)."""
     db = SessionLocal()
     try:
         rows = (
             db.query(OHLCV)
-            .filter(OHLCV.timeframe == timeframe)
+            .filter(OHLCV.timeframe == timeframe, OHLCV.source == "yahoo")
             .order_by(desc(OHLCV.timestamp))
-            .limit(limit * 2)  # over-fetch, we'll dedupe
+            .limit(limit)
             .all()
         )
 
-        # Dedupe by timestamp, preferring 'stooq' over 'yahoo'.
-        by_ts: dict[int, OHLCV] = {}
-        for r in rows:
-            if r.open is None or r.high is None or r.low is None or r.close is None:
-                continue  # lightweight-charts can't handle null OHLC
-            ts = int(r.timestamp.timestamp())
-            existing = by_ts.get(ts)
-            if existing is None:
-                by_ts[ts] = r
-            elif existing.source != "stooq" and r.source == "stooq":
-                by_ts[ts] = r  # prefer stooq
-
-        deduped = sorted(by_ts.values(), key=lambda r: r.timestamp)[-limit:]
-        return {"data": [_ohlcv_to_dict(r) for r in deduped]}
+        # Skip bars with null OHLC (lightweight-charts can't render them).
+        valid = [
+            r for r in rows
+            if r.open is not None and r.high is not None
+            and r.low is not None and r.close is not None
+        ]
+        ordered = sorted(valid, key=lambda r: r.timestamp)
+        return {"data": [_ohlcv_to_dict(r) for r in ordered]}
     finally:
         db.close()
 

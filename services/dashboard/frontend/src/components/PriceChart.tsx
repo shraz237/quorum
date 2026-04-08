@@ -208,7 +208,7 @@ const PriceChart: React.FC<PriceChartProps> = ({
     <div className="bg-gray-900 rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold text-gray-300">
-          Brent Crude — {timeframe}
+          WTI Crude (CL=F) — {timeframe}
         </h2>
         {bars.length > 0 && (
           <span className="text-xs text-gray-500">

@@ -241,7 +241,7 @@ async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if update.message is None:
         return
     await update.message.reply_text(
-        "Brent Trading Bot ready.\n\n"
+        "WTI Trading Bot ready.\n\n"
         "Just send me any question and I'll research it live with the bot's data:\n"
         " • should I go long now?\n"
         " • show me my open positions\n"

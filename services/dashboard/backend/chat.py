@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = "claude-opus-4-6"
 
-SYSTEM_PROMPT = """You are the trading assistant for a Brent crude oil CFD trader on XTB.
+SYSTEM_PROMPT = """You are the trading assistant for a WTI crude oil CFD trader on XTB (OIL.WTI symbol).
 You have access to a live trading bot's database AND can EXECUTE trades on the bot's
 internal book (5-component scoring, AI-generated recommendations, @marketfeed digests,
 open positions, account state, DCA campaigns).

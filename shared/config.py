@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     eia_api_key: str = ""
     fred_api_key: str = ""
     quandl_api_key: str = ""
+    finnhub_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 

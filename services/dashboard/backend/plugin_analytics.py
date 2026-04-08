@@ -935,7 +935,7 @@ def _get_system_health() -> dict:
         with SessionLocal() as session:
             # OHLCV per source
             ohlcv_sources: dict[str, datetime | None] = {}
-            for src in ("stooq", "yahoo"):
+            for src in ("yahoo",):
                 ts = session.query(func.max(OHLCV.timestamp)).filter(
                     OHLCV.source == src, OHLCV.timeframe == "1min"
                 ).scalar()
@@ -975,7 +975,6 @@ def _get_system_health() -> dict:
         return {
             "checked_at": now.isoformat(),
             "sources": {
-                "stooq_1min": _entry("stooq", ohlcv_sources.get("stooq"), 300),
                 "yahoo_1min": _entry("yahoo", ohlcv_sources.get("yahoo"), 300),
                 "eia": _entry("eia", eia_ts, 7 * 86400 + 3600),  # weekly + 1h grace
                 "fred": _entry("fred", fred_ts, 86400 + 3600),   # daily + 1h grace
@@ -1000,11 +999,6 @@ def _get_data_sources_status() -> dict:
 
         # Expected cadence metadata
         cadences: dict[str, dict] = {
-            "stooq_1min": {
-                "expected_cadence": "1min",
-                "stale_after_seconds": 300,
-                "next_calc": lambda age: max(0, 60 - age),
-            },
             "yahoo_1min": {
                 "expected_cadence": "1min",
                 "stale_after_seconds": 300,
