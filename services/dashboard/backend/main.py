@@ -274,6 +274,44 @@ def get_conviction_endpoint() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@app.get("/api/now-brief")
+def get_now_brief_endpoint(force: bool = Query(default=False)) -> dict[str, Any]:
+    """Return an AI-generated synthesis of the current dashboard state."""
+    try:
+        from plugin_now_brief import compute_now_brief
+        return {"data": compute_now_brief(force=force)}
+    except Exception as exc:
+        logger.exception("get_now_brief_endpoint failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/signal-confluence")
+def get_signal_confluence_endpoint() -> dict[str, Any]:
+    """Return per-signal BULL/BEAR/NEUTRAL classification."""
+    try:
+        from plugin_now_brief import compute_signal_confluence
+        return {"data": compute_signal_confluence()}
+    except Exception as exc:
+        logger.exception("get_signal_confluence_endpoint failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/anomalies")
+def get_anomalies_endpoint(hours: int = Query(default=24, ge=1, le=168)) -> dict[str, Any]:
+    """Return currently-active extreme anomalies and recent history."""
+    try:
+        from plugin_anomalies import detect_anomalies, get_anomaly_history
+        return {
+            "data": {
+                "current": detect_anomalies(),
+                "history": get_anomaly_history(hours=hours),
+            }
+        }
+    except Exception as exc:
+        logger.exception("get_anomalies_endpoint failed")
+        return {"error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Binance derived metrics endpoints
 # ---------------------------------------------------------------------------

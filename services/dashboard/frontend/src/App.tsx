@@ -12,6 +12,7 @@ import CampaignsPanel from "./components/CampaignsPanel";
 import BinanceMetricsPanel from "./components/BinanceMetricsPanel";
 import BinanceProPanel from "./components/BinanceProPanel";
 import ConvictionMeter from "./components/ConvictionMeter";
+import SynthesisPanel from "./components/SynthesisPanel";
 
 // ---------------------------------------------------------------------------
 // Types matching the backend JSON
@@ -185,6 +186,9 @@ const App: React.FC = () => {
           {wsConnected ? "Live" : "Disconnected"}
         </span>
       </header>
+
+      {/* Synthesis layer — Now Brief + Signal Confluence + Anomaly Radar */}
+      <SynthesisPanel />
 
       {/* Account Panel */}
       <AccountPanel />
