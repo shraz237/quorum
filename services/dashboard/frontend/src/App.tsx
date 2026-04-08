@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import useApi from "./hooks/useApi";
-import ScoreGauge from "./components/ScoreGauge";
+import AnalysisScoresPanel from "./components/AnalysisScoresPanel";
 import PriceChart, { OHLCVBar, PositionOverlay, SignalOverlay } from "./components/PriceChart";
 import SignalHistory, { Signal } from "./components/SignalHistory";
 import LogsPanel from "./components/LogsPanel";
@@ -190,23 +190,8 @@ const App: React.FC = () => {
       {/* Binance Derivatives Metrics — funding, OI, L/S ratios, liquidations */}
       <BinanceMetricsPanel />
 
-      {/* Score Gauges */}
-      <section className="mb-6">
-        <h2 className="text-xs uppercase tracking-widest text-gray-500 mb-3">
-          Analysis Scores
-        </h2>
-        {scoreLoading && !score ? (
-          <p className="text-gray-600 text-sm">Loading scores…</p>
-        ) : (
-          <div className="flex flex-wrap gap-3">
-            <ScoreGauge label="Technical" value={score?.technical_score} />
-            <ScoreGauge label="Fundamental" value={score?.fundamental_score} />
-            <ScoreGauge label="Sentiment" value={score?.sentiment_score} />
-            <ScoreGauge label="Shipping" value={score?.shipping_score} />
-            <ScoreGauge label="Unified" value={score?.unified_score} />
-          </div>
-        )}
-      </section>
+      {/* Analysis Scores — full-width row of 5 bipolar score cards */}
+      <AnalysisScoresPanel scores={score as any} loading={scoreLoading} />
 
       {/* Price Chart */}
       <section className="mb-6">
