@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     binance_symbol: str = "CLUSDT"  # TRADIFI perpetual tracking NYMEX WTI front-month
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # Comma-separated list of additional chat_ids that RECEIVE notifications
+    # but cannot interact with the bot (no chat, no commands). Used for
+    # read-only observers. Only telegram_chat_id can send messages.
+    telegram_notify_chat_ids: str = ""
 
     # Infrastructure
     postgres_url: str = "postgresql://trading:trading@localhost:5432/trading"

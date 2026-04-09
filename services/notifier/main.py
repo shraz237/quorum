@@ -55,6 +55,11 @@ TELEGRAM_CHUNK = 3800
 
 
 def _allowed_chat_id() -> int | None:
+    """Return the single chat_id allowed to INTERACT with the bot (send messages).
+
+    Notifications fan out to a wider list — see _all_notify_chat_ids().
+    Inbound access control stays strict: only this chat_id can chat with the bot.
+    """
     if not settings.telegram_chat_id:
         return None
     try:
@@ -63,20 +68,65 @@ def _allowed_chat_id() -> int | None:
         return None
 
 
+def _all_notify_chat_ids() -> list[int]:
+    """Return every chat_id that should receive outbound notifications.
+
+    Includes the main telegram_chat_id + all read-only observer ids from
+    telegram_notify_chat_ids. Observers see everything the main user sees
+    (signals, position events, heartbeats, alerts) but cannot interact —
+    _allowed_chat_id() is still the gate for inbound messages.
+    """
+    ids: list[int] = []
+    seen: set[int] = set()
+
+    main = _allowed_chat_id()
+    if main is not None:
+        ids.append(main)
+        seen.add(main)
+
+    raw = (settings.telegram_notify_chat_ids or "").strip()
+    if raw:
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                cid = int(part)
+            except (TypeError, ValueError):
+                logger.warning("Ignoring invalid telegram_notify_chat_ids entry: %r", part)
+                continue
+            if cid not in seen:
+                ids.append(cid)
+                seen.add(cid)
+
+    return ids
+
+
 async def _safe_send(bot: Bot, text: str, parse_mode: str | None = ParseMode.MARKDOWN) -> None:
-    """Send a message, falling back to plain text if Markdown parsing fails."""
-    try:
-        await bot.send_message(
-            chat_id=settings.telegram_chat_id,
-            text=text,
-            parse_mode=parse_mode,
-        )
-    except Exception:
-        logger.exception("Markdown send failed, retrying as plain text")
+    """Send a notification to every recipient chat_id.
+
+    Fans out to the main user + every read-only observer. Falls back to
+    plain text per recipient if Markdown parsing fails for that recipient.
+    A failure for one recipient does not block others.
+    """
+    recipients = _all_notify_chat_ids()
+    if not recipients:
+        logger.warning("No Telegram recipients configured — dropping notification")
+        return
+
+    for chat_id in recipients:
         try:
-            await bot.send_message(chat_id=settings.telegram_chat_id, text=text)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+            )
         except Exception:
-            logger.exception("Plain-text send also failed")
+            logger.exception("Markdown send to %s failed, retrying as plain text", chat_id)
+            try:
+                await bot.send_message(chat_id=chat_id, text=text)
+            except Exception:
+                logger.exception("Plain-text send to %s also failed", chat_id)
 
 
 async def _send_chunked(bot: Bot, text: str) -> None:
@@ -237,7 +287,29 @@ async def _handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await _safe_send(context.bot, extra)
 
 
+async def _reject_if_unauthorized(update: Update) -> bool:
+    """Return True if the update came from a non-authorized chat.
+
+    Observer chat_ids in telegram_notify_chat_ids receive notifications
+    but are NOT allowed to interact — they get 'Unauthorized.' and the
+    command/message is dropped. Only telegram_chat_id can trigger commands
+    or chat.
+    """
+    if update.effective_chat is None or update.message is None:
+        return True
+    allowed = _allowed_chat_id()
+    if allowed is not None and update.effective_chat.id != allowed:
+        try:
+            await update.message.reply_text("Unauthorized.")
+        except Exception:
+            pass
+        return True
+    return False
+
+
 async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _reject_if_unauthorized(update):
+        return
     if update.message is None:
         return
     await update.message.reply_text(
@@ -260,6 +332,8 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _cmd_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shortcut: ask the chat backend for the current state."""
+    if await _reject_if_unauthorized(update):
+        return
     fake_text = "Show me the current market state in a brief table."
     if update.message is None:
         return
@@ -268,6 +342,8 @@ async def _cmd_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _reject_if_unauthorized(update):
+        return
     fake_text = "List my open positions with live PnL."
     if update.message is None:
         return
