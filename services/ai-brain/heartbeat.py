@@ -50,6 +50,7 @@ from shared.position_manager import (
 )
 from shared.redis_streams import get_redis, publish
 from shared.llm_usage import record_anthropic_call, record_failure
+from shared.account_manager import DEFAULT_LEVERAGE
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +407,8 @@ def _build_campaign_snapshot(campaign_id: int, current_price: float | None) -> d
         "max_layers": state.get("max_layers"),
         "total_lots": state.get("total_lots"),
         "total_margin": state.get("total_margin"),
+        "total_nominal": state.get("total_nominal"),
+        "leverage": DEFAULT_LEVERAGE,
         "unrealized_pnl_usd": state.get("unrealised_pnl"),
         "unrealized_pnl_pct": state.get("unrealised_pnl_pct"),
         "take_profit": state.get("take_profit"),
@@ -665,6 +668,11 @@ def _execute_decision(
                 "side": camp_ctx.get("side"),
                 "realized_pnl": snap.get("realized_pnl") or snap.get("realised_pnl"),
                 "pnl_pct_at_close": pnl_pct,
+                "total_margin": camp_ctx.get("total_margin"),
+                "total_lots": camp_ctx.get("total_lots"),
+                "total_nominal": camp_ctx.get("total_nominal"),
+                "leverage": camp_ctx.get("leverage") or DEFAULT_LEVERAGE,
+                "avg_entry": camp_ctx.get("avg_entry"),
             },
         )
         return
@@ -725,6 +733,13 @@ def _execute_decision(
                 "new_take_profit": result["new_take_profit"],
                 "old_stop_loss": result["old_stop_loss"],
                 "new_stop_loss": result["new_stop_loss"],
+                "total_margin": camp_ctx.get("total_margin"),
+                "total_lots": camp_ctx.get("total_lots"),
+                "total_nominal": camp_ctx.get("total_nominal"),
+                "leverage": camp_ctx.get("leverage") or DEFAULT_LEVERAGE,
+                "avg_entry": camp_ctx.get("avg_entry"),
+                "unrealized_pnl_usd": camp_ctx.get("unrealized_pnl_usd"),
+                "unrealized_pnl_pct": camp_ctx.get("unrealized_pnl_pct"),
             },
         )
         return
@@ -893,7 +908,13 @@ def _build_status_ping_payload(camp_ctx: dict, latest_reason: str | None) -> dic
         "distance_to_tp_pct": _pct_distance(tp),
         "distance_to_sl_pct": _pct_distance(sl),
         "layers": camp_ctx.get("layers"),
+        "max_layers": camp_ctx.get("max_layers"),
         "age_hours": camp_ctx.get("age_hours"),
+        # Sizing — so the user sees "margin × leverage = notional exposure"
+        "total_margin": camp_ctx.get("total_margin"),
+        "total_lots": camp_ctx.get("total_lots"),
+        "total_nominal": camp_ctx.get("total_nominal"),
+        "leverage": camp_ctx.get("leverage") or DEFAULT_LEVERAGE,
         "latest_reason": (latest_reason or "")[:400],
     }
 

@@ -107,6 +107,60 @@ def format_system_alert(message: str) -> str:
     return f"{WARNING_EMOJI} *System Alert*\n{message}"
 
 
+def _format_sizing_block(evt: dict) -> list[str]:
+    """Render the margin / leverage / notional exposure block.
+
+    Used by every campaign + heartbeat notification so the user always
+    sees exactly how much skin is in the trade. Format:
+
+        Margin:   $3,000  x10 leverage
+        Exposure: $30,000 (2.54 lots ~ 254 bbl)
+
+    Silently omits any field that's missing — returns an empty list
+    when there's nothing to show, so callers can `+=` without worry.
+    """
+    lines: list[str] = []
+
+    margin = evt.get("total_margin")
+    leverage = evt.get("leverage")
+    nominal = evt.get("total_nominal")
+    lots = evt.get("total_lots")
+
+    # Margin + leverage line
+    if margin is not None:
+        try:
+            margin_f = float(margin)
+            if leverage is not None:
+                try:
+                    lev_int = int(leverage)
+                    lines.append(f"Margin:      ${margin_f:,.0f}  x{lev_int} leverage")
+                except (TypeError, ValueError):
+                    lines.append(f"Margin:      ${margin_f:,.0f}")
+            else:
+                lines.append(f"Margin:      ${margin_f:,.0f}")
+        except (TypeError, ValueError):
+            pass
+
+    # Notional exposure line with lots and barrels
+    if nominal is not None:
+        try:
+            nominal_f = float(nominal)
+            detail_parts: list[str] = []
+            if lots is not None:
+                try:
+                    lots_f = float(lots)
+                    barrels = int(round(lots_f * 100))
+                    detail_parts.append(f"{lots_f:.2f} lots ~ {barrels} bbl")
+                except (TypeError, ValueError):
+                    pass
+            detail = f" ({' · '.join(detail_parts)})" if detail_parts else ""
+            lines.append(f"Exposure:    ${nominal_f:,.0f}{detail}")
+        except (TypeError, ValueError):
+            pass
+
+    return lines
+
+
 _POSITION_EVENT_TITLES = {
     # Legacy single-position events
     "opened":                ("\U0001f4e5", "Position OPENED"),
@@ -195,12 +249,21 @@ def _format_heartbeat_status(evt: dict) -> str:
         except (TypeError, ValueError):
             pass
 
+    # Sizing block: Margin x Leverage = Exposure
+    sizing_lines = _format_sizing_block(evt)
+    if sizing_lines:
+        lines += sizing_lines
+
     # Layers + age
     layers = evt.get("layers")
+    max_layers = evt.get("max_layers")
     age_hours = evt.get("age_hours")
     meta_parts = []
     if layers is not None:
-        meta_parts.append(f"{layers} layers")
+        if max_layers is not None:
+            meta_parts.append(f"{layers}/{max_layers} layers")
+        else:
+            meta_parts.append(f"{layers} layers")
     if age_hours is not None:
         try:
             meta_parts.append(f"{float(age_hours):.1f}h open")
@@ -317,6 +380,21 @@ def _format_heartbeat_action(evt: dict) -> str:
             lines.append(f"TP: {old_tp} → {new_tp}")
         if new_sl is not None or old_sl is not None:
             lines.append(f"SL: {old_sl} → {new_sl}")
+        pnl = evt.get("unrealized_pnl_usd")
+        pnl_pct = evt.get("unrealized_pnl_pct")
+        if pnl is not None and pnl_pct is not None:
+            try:
+                pnl_f = float(pnl)
+                pct_f = float(pnl_pct)
+                sign = "+" if pnl_f >= 0 else ""
+                lines.append(f"Unrealised:  {sign}${pnl_f:.0f}  ({sign}{pct_f:.2f}%)")
+            except (TypeError, ValueError):
+                pass
+
+    # Sizing block: Margin x Leverage = Exposure
+    sizing_lines = _format_sizing_block(evt)
+    if sizing_lines:
+        lines += sizing_lines
 
     if reason:
         lines += ["", f"_{reason}_"]
@@ -465,18 +543,9 @@ def format_position_event(evt: dict) -> str | None:
     if layer_idx is not None:
         lines.append(f"Layer:       #{layer_idx}")
 
-    total_lots = evt.get("total_lots")
-    total_margin = evt.get("total_margin")
-    if total_lots is not None:
-        try:
-            lines.append(f"Total lots:  {float(total_lots):.2f}")
-        except (TypeError, ValueError):
-            pass
-    if total_margin is not None:
-        try:
-            lines.append(f"Margin:      ${float(total_margin):.0f}")
-        except (TypeError, ValueError):
-            pass
+    # Sizing block: Margin / Leverage / Exposure + lots. Shown on every
+    # campaign event so the user instantly sees skin-in-the-trade.
+    lines += _format_sizing_block(evt)
 
     notes = evt.get("notes") or evt.get("reason")
     if notes:

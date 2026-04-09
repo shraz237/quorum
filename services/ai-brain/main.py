@@ -12,14 +12,38 @@ from shared.redis_streams import subscribe, publish
 from shared.schemas.events import RecommendationEvent
 from shared.position_manager import (
     check_tp_sl_hits,
+    compute_campaign_state,
     list_open_positions,
     list_open_campaigns,
     open_new_campaign,
     add_dca_layer,
     get_current_price,
 )
-from shared.account_manager import recompute_account_state
+from shared.account_manager import DEFAULT_LEVERAGE, recompute_account_state
 from shared.sizing import DCA_LAYERS_MARGIN, DCA_DRAWDOWN_TRIGGER_PCT
+
+
+def _campaign_sizing_payload(campaign_id: int) -> dict:
+    """Return the sizing fields for Telegram notifications.
+
+    margin × leverage = notional — this is what the user wants to see
+    at a glance in every notification. Silently returns an empty dict if
+    the campaign state can't be computed so the publish never fails.
+    """
+    try:
+        state = compute_campaign_state(campaign_id) or {}
+        return {
+            "total_margin": state.get("total_margin"),
+            "total_lots": state.get("total_lots"),
+            "total_nominal": state.get("total_nominal"),
+            "leverage": DEFAULT_LEVERAGE,
+            "avg_entry_price": state.get("avg_entry_price"),
+            "layers_used": state.get("layers_used"),
+            "max_layers": state.get("max_layers"),
+        }
+    except Exception:
+        logger.exception("Failed to fetch sizing payload for campaign #%s", campaign_id)
+        return {}
 
 from agents.haiku import summarize_scores
 from agents.grok import get_twitter_narrative
@@ -194,6 +218,7 @@ def _handle_campaign_signal(new_side: str, conf: float, rec: dict) -> None:
                 "stop_loss": opus_sl,
                 "layer": 0,
                 "reason": (rec.get("reasoning") or "")[:200],
+                **_campaign_sizing_payload(campaign_id),
             },
         )
         return
@@ -272,6 +297,7 @@ def _handle_campaign_signal(new_side: str, conf: float, rec: dict) -> None:
                     "entry_price": current_price,
                     "layer": layers_used,
                     "reason": reason,
+                    **_campaign_sizing_payload(camp["id"]),
                 },
             )
             logger.info(
