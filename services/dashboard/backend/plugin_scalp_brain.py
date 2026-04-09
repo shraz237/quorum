@@ -875,4 +875,163 @@ def get_scalp_brain(force: bool = False) -> dict:
     with _CACHE_LOCK:
         _CACHE = result
         _CACHE_TS = now
+
+    # Auto-propose a scalp-domain thesis when the brain is in LEAN state.
+    # Rate-limited to prevent spam (max 1 per 15 min per intended side).
+    try:
+        _maybe_autopropose_thesis(result)
+    except Exception:
+        logger.exception("scalp_brain: autopropose failed")
+
     return {**result, "cache_age_seconds": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# Auto-propose scalp-domain theses on LEAN states
+# ---------------------------------------------------------------------------
+
+_AUTOPROPOSE_COOLDOWN_SECONDS = 15 * 60  # 15 min per intended side
+_AUTOPROPOSE_REDIS_PREFIX = "scalp_brain:last_propose:"  # + LONG | SHORT
+
+
+def _maybe_autopropose_thesis(result: dict) -> None:
+    """If the scalp brain is in LEAN_LONG or LEAN_SHORT with strong
+    signals, save a scalp-domain thesis describing the conditions that
+    would turn this into a NOW verdict. The thesis is the scalper's
+    own forward-looking thought — it builds a learning corpus over
+    time so the scalp bot can review its past LEAN states and learn
+    which ones actually completed into profitable trades.
+
+    Rate-limited per intended side so we don't spam the theses table.
+    """
+    verdict = result.get("verdict")
+    if verdict not in ("LEAN_LONG", "LEAN_SHORT"):
+        return
+
+    intended_side = result.get("intended_side")
+    if intended_side not in ("LONG", "SHORT"):
+        return
+
+    # Cooldown check
+    try:
+        from shared.redis_streams import get_redis
+        r = get_redis()
+        key = f"{_AUTOPROPOSE_REDIS_PREFIX}{intended_side}"
+        last_raw = r.get(key)
+        if isinstance(last_raw, bytes):
+            last_raw = last_raw.decode("utf-8")
+        if last_raw:
+            try:
+                last_ts = float(last_raw)
+                if (time.time() - last_ts) < _AUTOPROPOSE_COOLDOWN_SECONDS:
+                    return  # still cooling down
+            except (TypeError, ValueError):
+                pass
+        r.set(key, str(time.time()))
+    except Exception:
+        logger.exception("scalp_brain: cooldown check failed")
+        return
+
+    # Build a rich thesis describing the current setup
+    try:
+        from shared.theses import create_thesis
+        from shared.redis_streams import publish as _publish
+    except Exception:
+        logger.exception("scalp_brain: theses import failed")
+        return
+
+    current_price = result.get("current_price")
+    conviction = result.get("conviction_pct")
+    levels = result.get("trade_levels") or {}
+    signals = result.get("signals") or {}
+    gates = result.get("gatekeepers") or {}
+    why = result.get("why", "")
+
+    # Include firing signals + gatekeeper status in the thesis_text so
+    # the scalp brain can later review WHY it leaned without having to
+    # cross-reference anything else.
+    firing = [
+        f"{k.replace('_', ' ')}={v.get('bias')} (w{v.get('weight')}): {v.get('detail', {}).get('reason', '')}"
+        for k, v in signals.items()
+        if v.get("bias") in ("bullish", "bearish")
+    ]
+
+    gate_str = " · ".join(
+        f"{k}:{'OK' if g.get('ok') else 'FAIL'}" for k, g in gates.items()
+    )
+
+    # Trigger: thesis fires when scalp brain flips to NOW verdict in
+    # same direction (meaning the LEAN completed into a conviction trade)
+    trigger_state = "LONG" if intended_side == "LONG" else "SHORT"
+
+    title = f"Scalp LEAN_{intended_side} @ ${float(current_price):.2f} — awaiting NOW confirmation"
+    thesis_text = (
+        f"Scalp brain currently LEAN_{intended_side} with {conviction}% conviction. "
+        f"Firing signals: {' · '.join(firing) if firing else 'none'}. "
+        f"Gatekeepers: {gate_str}. "
+        f"Why: {why}. "
+        f"Planned levels if this flips to NOW: entry ${levels.get('entry')}, "
+        f"SL ${levels.get('stop_loss')}, TP1 ${levels.get('take_profit_1')}, "
+        f"TP2 ${levels.get('take_profit_2')}, R:R {levels.get('rr_tp1')}/{levels.get('rr_tp2')}."
+    )
+
+    try:
+        new_id = create_thesis(
+            created_by="scalp_brain",
+            domain="scalp",
+            title=title[:200],
+            thesis_text=thesis_text,
+            reasoning=why[:2000] if why else None,
+            context_snapshot={
+                "verdict": verdict,
+                "conviction_pct": conviction,
+                "current_price": current_price,
+                "signals": signals,
+                "gatekeepers": gates,
+                "trade_levels": levels,
+            },
+            trigger_type="scalp_brain_state",
+            trigger_params={"state": trigger_state},
+            planned_action=intended_side,
+            planned_entry=levels.get("entry"),
+            planned_stop_loss=levels.get("stop_loss"),
+            planned_take_profit=levels.get("take_profit_1"),
+            planned_size_margin=1000,  # small scalp sizing
+            outcome_mode="tp_or_sl_first",
+            resolution_window_minutes=60,  # scalps resolve fast — 1h window
+        )
+    except Exception:
+        logger.exception("scalp_brain: create_thesis failed")
+        return
+
+    if new_id is None:
+        return
+
+    logger.info(
+        "scalp_brain autoproposed scalp thesis #%s for %s (verdict=%s, conv=%s%%)",
+        new_id, intended_side, verdict, conviction,
+    )
+
+    # Publish a thesis_created event for Telegram
+    try:
+        _publish(
+            "position.event",
+            {
+                "type": "thesis_created",
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "thesis_id": new_id,
+                "domain": "scalp",
+                "title": title,
+                "thesis_text": thesis_text,
+                "trigger_type": "scalp_brain_state",
+                "trigger_params": {"state": trigger_state},
+                "planned_action": intended_side,
+                "planned_entry": levels.get("entry"),
+                "planned_stop_loss": levels.get("stop_loss"),
+                "planned_take_profit": levels.get("take_profit_1"),
+                "planned_size_margin": 1000,
+                "created_by": "scalp_brain",
+            },
+        )
+    except Exception:
+        logger.exception("scalp_brain: failed to publish thesis_created")

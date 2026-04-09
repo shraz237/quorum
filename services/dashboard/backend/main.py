@@ -12,7 +12,7 @@ from typing import Any
 
 import redis as redis_sync
 import docker as docker_sdk
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1009,6 +1009,43 @@ def get_liquidations(
             "events": events,
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Theses — forward-looking conditional plans
+# ---------------------------------------------------------------------------
+
+@app.get("/api/theses")
+def get_theses_endpoint(
+    domain: str | None = Query(default=None, description="campaign | scalp | None = all"),
+) -> dict[str, Any]:
+    try:
+        from plugin_theses import get_theses_payload
+        effective = None if domain in (None, "all") else domain
+        return {"data": get_theses_payload(domain=effective)}
+    except Exception as exc:
+        logger.exception("theses endpoint failed")
+        return {"error": str(exc)}
+
+
+@app.post("/api/theses", dependencies=[Depends(require_api_key)])
+def create_thesis_endpoint(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    try:
+        from plugin_theses import create_from_form
+        return {"data": create_from_form(payload)}
+    except Exception as exc:
+        logger.exception("create thesis failed")
+        return {"error": str(exc)}
+
+
+@app.post("/api/theses/{thesis_id}/cancel", dependencies=[Depends(require_api_key)])
+def cancel_thesis_endpoint(thesis_id: int) -> dict[str, Any]:
+    try:
+        from plugin_theses import cancel
+        return {"data": cancel(thesis_id)}
+    except Exception as exc:
+        logger.exception("cancel thesis failed")
+        return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------

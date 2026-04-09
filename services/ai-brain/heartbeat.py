@@ -114,7 +114,11 @@ MANAGE_CAMPAIGNS_TOOL = {
         "exactly one decision per open campaign — do not forget any. Be "
         "conservative with 'close': only close when the thesis is clearly broken. "
         "Prefer 'update_levels' (tighten SL) over premature 'close'. Use 'hold' "
-        "when the thesis still applies and levels do not need adjustment."
+        "when the thesis still applies and levels do not need adjustment.\n\n"
+        "You may ALSO return up to 3 propose_theses entries — forward-looking "
+        "conditional plans like 'if price drops to 94 I would reconsider long'. "
+        "These do not execute anything; they just get saved for the user to review "
+        "and the system will notify them when the trigger fires."
     ),
     "input_schema": {
         "type": "object",
@@ -169,6 +173,46 @@ MANAGE_CAMPAIGNS_TOOL = {
             "overall_rationale": {
                 "type": "string",
                 "description": "One paragraph summarising the market read for this tick.",
+            },
+            "propose_theses": {
+                "type": "array",
+                "description": (
+                    "Optional — up to 3 forward-looking conditional plans. "
+                    "Each proposal becomes a pending thesis row in the campaign "
+                    "domain. The system will watch the trigger condition and "
+                    "alert the user when it fires. Never executes anything."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Short title, ≤ 120 chars"},
+                        "thesis_text": {"type": "string", "description": "Full reasoning, 2-4 sentences"},
+                        "trigger_type": {
+                            "type": "string",
+                            "enum": [
+                                "price_cross_above",
+                                "price_cross_below",
+                                "score_above",
+                                "score_below",
+                                "time_elapsed",
+                            ],
+                        },
+                        "trigger_params": {
+                            "type": "object",
+                            "description": (
+                                "price_cross_*: {price: number}. "
+                                "score_*: {score: number, score_key?: 'unified'}. "
+                                "time_elapsed: {minutes: number}."
+                            ),
+                        },
+                        "planned_action": {"type": "string", "enum": ["LONG", "SHORT", "CLOSE_EXISTING", "WATCH"]},
+                        "planned_entry": {"type": ["number", "null"]},
+                        "planned_stop_loss": {"type": ["number", "null"]},
+                        "planned_take_profit": {"type": ["number", "null"]},
+                        "planned_size_margin": {"type": ["number", "null"]},
+                    },
+                    "required": ["title", "thesis_text", "trigger_type", "trigger_params", "planned_action"],
+                },
             },
         },
         "required": ["decisions", "overall_rationale"],
@@ -799,6 +843,83 @@ def _execute_decision(
 
 
 # ---------------------------------------------------------------------------
+# Opus-proposed theses — save forward-looking plans the user can review
+# ---------------------------------------------------------------------------
+
+
+def _process_proposed_theses(proposals: list) -> None:
+    """Save up to 3 Opus-proposed theses from a heartbeat tick.
+
+    Each proposal becomes a pending thesis row in the campaign domain
+    with created_by='heartbeat'. A thesis_created event is published so
+    the user sees it on Telegram immediately. Silent on failure — this
+    is a nice-to-have and must never break the heartbeat tick.
+    """
+    if not isinstance(proposals, list) or not proposals:
+        return
+
+    try:
+        from shared.theses import create_thesis
+    except Exception:
+        logger.exception("heartbeat: failed to import create_thesis")
+        return
+
+    for proposal in proposals[:3]:  # hard cap at 3 per tick
+        if not isinstance(proposal, dict):
+            continue
+        try:
+            title = (proposal.get("title") or "").strip()
+            thesis_text = (proposal.get("thesis_text") or "").strip()
+            trigger_type = proposal.get("trigger_type")
+            trigger_params = proposal.get("trigger_params") or {}
+            planned_action = proposal.get("planned_action") or "WATCH"
+            if not title or not thesis_text or not trigger_type:
+                continue
+            new_id = create_thesis(
+                created_by="heartbeat",
+                domain="campaign",
+                title=title,
+                thesis_text=thesis_text,
+                reasoning=None,
+                trigger_type=trigger_type,
+                trigger_params=trigger_params,
+                planned_action=planned_action,
+                planned_entry=proposal.get("planned_entry"),
+                planned_stop_loss=proposal.get("planned_stop_loss"),
+                planned_take_profit=proposal.get("planned_take_profit"),
+                planned_size_margin=proposal.get("planned_size_margin"),
+            )
+            if new_id is None:
+                continue
+            logger.info("Heartbeat proposed thesis #%s: %r", new_id, title[:80])
+            # Publish a thesis_created event so Telegram renders it
+            try:
+                publish(
+                    STREAM_POSITION,
+                    {
+                        "type": "thesis_created",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "thesis_id": new_id,
+                        "domain": "campaign",
+                        "title": title,
+                        "thesis_text": thesis_text,
+                        "trigger_type": trigger_type,
+                        "trigger_params": trigger_params,
+                        "planned_action": planned_action,
+                        "planned_entry": proposal.get("planned_entry"),
+                        "planned_stop_loss": proposal.get("planned_stop_loss"),
+                        "planned_take_profit": proposal.get("planned_take_profit"),
+                        "planned_size_margin": proposal.get("planned_size_margin"),
+                        "created_by": "heartbeat",
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to publish thesis_created for heartbeat proposal")
+        except Exception:
+            logger.exception("heartbeat: failed to save a proposed thesis")
+
+
+# ---------------------------------------------------------------------------
 # Decision-signal hash — skip Opus when nothing materially changed
 # ---------------------------------------------------------------------------
 
@@ -1120,6 +1241,11 @@ def run_tick() -> dict:
         # Execute each decision
         for dec in decisions:
             _execute_decision(dec, context["open_campaigns"], ran_at, opus_out)
+
+        # Process optional forward-looking thesis proposals from Opus.
+        # These never execute anything — they save pending thesis rows
+        # the user can review (and the watcher will alert on trigger).
+        _process_proposed_theses(opus_out.get("propose_theses") or [])
 
         # Build the set of campaigns that had an executed action this tick.
         # These campaigns already fire their own Telegram alerts, so the

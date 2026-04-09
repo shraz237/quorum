@@ -13,7 +13,7 @@ import HeartbeatPill from "./HeartbeatPill";
 import ConvictionOneLiner from "./ConvictionOneLiner";
 import AccountOneLiner from "./AccountOneLiner";
 
-export type TabKey = "trade_now" | "positions" | "market" | "investigate" | "system";
+export type TabKey = "trade_now" | "positions" | "market" | "theses" | "investigate" | "system";
 
 export interface TabDef {
   key: TabKey;
@@ -26,8 +26,9 @@ export const TABS: TabDef[] = [
   { key: "trade_now",  icon: "🎯", label: "Trade Now",   shortcut: "1" },
   { key: "positions",  icon: "📊", label: "Positions",   shortcut: "2" },
   { key: "market",     icon: "🌍", label: "Market",      shortcut: "3" },
-  { key: "investigate", icon: "🔍", label: "Investigate", shortcut: "4" },
-  { key: "system",     icon: "⚙️", label: "System",      shortcut: "5" },
+  { key: "theses",     icon: "📌", label: "Theses",      shortcut: "4" },
+  { key: "investigate", icon: "🔍", label: "Investigate", shortcut: "5" },
+  { key: "system",     icon: "⚙️", label: "System",      shortcut: "6" },
 ];
 
 interface Props {

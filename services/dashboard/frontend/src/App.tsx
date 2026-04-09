@@ -8,6 +8,7 @@ import CockpitBar, { TabKey, TABS } from "./components/CockpitBar";
 import TradeNowTab from "./components/tabs/TradeNowTab";
 import PositionsTab from "./components/tabs/PositionsTab";
 import MarketTab from "./components/tabs/MarketTab";
+import ThesesTab from "./components/tabs/ThesesTab";
 import InvestigateTab from "./components/tabs/InvestigateTab";
 import SystemTab from "./components/tabs/SystemTab";
 
@@ -231,6 +232,7 @@ const App: React.FC = () => {
         )}
         {activeTab === "positions" && <PositionsTab />}
         {activeTab === "market" && <MarketTab />}
+        {activeTab === "theses" && <ThesesTab />}
         {activeTab === "investigate" && (
           <InvestigateTab
             score={score as any}

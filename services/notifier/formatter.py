@@ -204,7 +204,229 @@ _POSITION_EVENT_TITLES = {
     "heartbeat_status":      ("\U0001fac0", "Heartbeat Status"),             # anatomical heart
     # Scalp brain — ultimate scalper verdict transitions
     "scalp_brain_alert":     ("\u26a1",     "Scalp Brain"),                  # lightning
+    # Thesis lifecycle events — forward-looking plans
+    "thesis_created":        ("\U0001f4cc", "Thesis created"),               # pushpin
+    "thesis_triggered":      ("\U0001f514", "Thesis triggered"),             # bell
+    "thesis_resolved":       ("\U0001f4ca", "Thesis resolved"),              # bar chart
 }
+
+
+def _format_thesis_plan_block(evt: dict) -> list[str]:
+    """Shared entry/SL/TP/size renderer used by thesis_created and
+    thesis_triggered formatters so the planned trade is always shown
+    the same way."""
+    lines: list[str] = []
+    action = str(evt.get("planned_action") or "").upper()
+    entry = evt.get("planned_entry")
+    sl = evt.get("planned_stop_loss")
+    tp = evt.get("planned_take_profit")
+    size = evt.get("planned_size_margin")
+
+    if action and action != "NONE":
+        lines.append(f"Action: *{action}*")
+
+    def _fmt_price(label: str, val) -> str | None:
+        if val is None:
+            return None
+        try:
+            return f"{label}: `${float(val):.3f}`"
+        except (TypeError, ValueError):
+            return None
+
+    for label, val in (("Entry", entry), ("SL", sl), ("TP", tp)):
+        formatted = _fmt_price(label, val)
+        if formatted:
+            lines.append(formatted)
+
+    if size is not None:
+        try:
+            size_f = float(size)
+            leverage = 10  # matches account_manager.DEFAULT_LEVERAGE
+            exposure = size_f * leverage
+            lines.append(f"Size: `${size_f:,.0f}` margin  x{leverage}  (~`${exposure:,.0f}` exposure)")
+        except (TypeError, ValueError):
+            pass
+
+    return lines
+
+
+def _format_trigger_description(trigger_type: str, params: dict) -> str:
+    """Human-readable trigger condition for the Telegram body."""
+    if not isinstance(params, dict):
+        params = {}
+    if trigger_type == "price_cross_above":
+        p = params.get("price")
+        return f"price crosses ABOVE `${float(p):.3f}`" if p is not None else "price crosses above"
+    if trigger_type == "price_cross_below":
+        p = params.get("price")
+        return f"price crosses BELOW `${float(p):.3f}`" if p is not None else "price crosses below"
+    if trigger_type == "score_above":
+        s = params.get("score")
+        k = params.get("score_key", "unified")
+        return f"{k} score ≥ `{float(s):.1f}`" if s is not None else "score above"
+    if trigger_type == "score_below":
+        s = params.get("score")
+        k = params.get("score_key", "unified")
+        return f"{k} score ≤ `{float(s):.1f}`" if s is not None else "score below"
+    if trigger_type == "time_elapsed":
+        m = params.get("minutes", 0)
+        return f"{int(m)} min elapsed since creation"
+    if trigger_type == "news_keyword":
+        kws = params.get("keywords") or []
+        if isinstance(kws, str):
+            kws = [kws]
+        return f"news contains any of: {', '.join(kws)}" if kws else "news keyword"
+    if trigger_type == "scalp_brain_state":
+        s = params.get("state", "?")
+        return f"scalp brain verdict becomes {s}"
+    if trigger_type == "manual":
+        return "manual only"
+    return trigger_type
+
+
+def _format_thesis_created(evt: dict) -> str:
+    camp_scalp_tag = "scalp" if evt.get("domain") == "scalp" else "campaign"
+    title = f"{_test_prefix(evt)}Thesis created [{camp_scalp_tag}]"
+    lines = [f"\U0001f4cc *{title}*"]
+
+    th_id = evt.get("thesis_id")
+    user_label = str(evt.get("created_by", "")).replace("_", " ")
+    if th_id is not None:
+        meta = f"#{th_id}"
+        if user_label:
+            meta += f" · by {user_label}"
+        lines.append(meta)
+
+    thesis_title = (evt.get("title") or "").strip()
+    if thesis_title:
+        lines.append("")
+        lines.append(f"*{thesis_title}*")
+
+    text = (evt.get("thesis_text") or "").strip()
+    if text:
+        lines.append(text)
+
+    lines.append("")
+    lines.append(f"Trigger: {_format_trigger_description(evt.get('trigger_type', ''), evt.get('trigger_params') or {})}")
+
+    plan_lines = _format_thesis_plan_block(evt)
+    if plan_lines:
+        lines.append("")
+        lines += plan_lines
+
+    ts = evt.get("timestamp")
+    if ts:
+        lines += ["", f"_at {ts}_"]
+    return "\n".join(lines)
+
+
+def _format_thesis_triggered(evt: dict) -> str:
+    camp_scalp_tag = "scalp" if evt.get("domain") == "scalp" else "campaign"
+    title = f"{_test_prefix(evt)}Thesis TRIGGERED [{camp_scalp_tag}]"
+    lines = [f"\U0001f514 *{title}*"]
+
+    th_id = evt.get("thesis_id")
+    if th_id is not None:
+        lines.append(f"#{th_id}")
+
+    thesis_title = (evt.get("title") or "").strip()
+    if thesis_title:
+        lines.append("")
+        lines.append(f"*{thesis_title}*")
+
+    text = (evt.get("thesis_text") or "").strip()
+    if text:
+        lines.append(text)
+
+    snap = evt.get("trigger_snapshot") or {}
+    lines.append("")
+    lines.append(f"Trigger: {_format_trigger_description(evt.get('trigger_type', ''), {})}")
+    # Show what we saw at trigger time
+    if "current_price" in snap and "target_price" in snap:
+        try:
+            lines.append(
+                f"Saw price `${float(snap['current_price']):.3f}` vs target `${float(snap['target_price']):.3f}`"
+            )
+        except (TypeError, ValueError):
+            pass
+    if "current_score" in snap:
+        try:
+            lines.append(f"Saw score `{float(snap['current_score']):.1f}`")
+        except (TypeError, ValueError):
+            pass
+    if "match" in snap and isinstance(snap["match"], dict):
+        kw = snap["match"].get("matched_keyword")
+        summ = snap["match"].get("summary", "")
+        if kw:
+            lines.append(f"News keyword: `{kw}`")
+        if summ:
+            lines.append(f"> {summ[:400]}")
+
+    plan_lines = _format_thesis_plan_block(evt)
+    if plan_lines:
+        lines.append("")
+        lines += plan_lines
+
+    lines += ["", "_Decide now — this is a notification, nothing was auto-executed._"]
+    ts = evt.get("timestamp")
+    if ts:
+        lines += ["", f"_at {ts}_"]
+    return "\n".join(lines)
+
+
+def _format_thesis_resolved(evt: dict) -> str:
+    camp_scalp_tag = "scalp" if evt.get("domain") == "scalp" else "campaign"
+    outcome = str(evt.get("outcome", "?")).lower()
+    icon_by_outcome = {
+        "correct": "\u2705",
+        "wrong": "\u274c",
+        "partial": "\u3030",
+        "unresolved": "\u2754",
+    }
+    outcome_icon = icon_by_outcome.get(outcome, "\U0001f4ca")
+    title = f"{_test_prefix(evt)}Thesis RESOLVED [{camp_scalp_tag}] {outcome.upper()}"
+    lines = [f"{outcome_icon} *{title}*"]
+
+    th_id = evt.get("thesis_id")
+    if th_id is not None:
+        lines.append(f"#{th_id}")
+    thesis_title = (evt.get("title") or "").strip()
+    if thesis_title:
+        lines.append("")
+        lines.append(f"*{thesis_title}*")
+
+    notes = (evt.get("notes") or "").strip()
+    if notes:
+        lines.append("")
+        lines.append(notes)
+
+    pnl = evt.get("hypothetical_pnl_usd")
+    if pnl is not None:
+        try:
+            pnl_f = float(pnl)
+            sign = "+" if pnl_f >= 0 else ""
+            lines.append(f"Hypothetical P/L: {sign}${pnl_f:.0f}")
+        except (TypeError, ValueError):
+            pass
+
+    mfe = evt.get("max_favorable_excursion")
+    mae = evt.get("max_adverse_excursion")
+    if mfe is not None or mae is not None:
+        parts = []
+        try:
+            if mfe is not None:
+                parts.append(f"MFE ${float(mfe):.2f}")
+            if mae is not None:
+                parts.append(f"MAE ${float(mae):.2f}")
+        except (TypeError, ValueError):
+            pass
+        if parts:
+            lines.append(" · ".join(parts))
+
+    ts = evt.get("timestamp")
+    if ts:
+        lines += ["", f"_at {ts}_"]
+    return "\n".join(lines)
 
 
 def _format_heartbeat_status(evt: dict) -> str:
@@ -499,6 +721,12 @@ def format_position_event(evt: dict) -> str | None:
         return _format_heartbeat_status(evt)
     if kind == "scalp_brain_alert":
         return _format_scalp_brain_alert(evt)
+    if kind == "thesis_created":
+        return _format_thesis_created(evt)
+    if kind == "thesis_triggered":
+        return _format_thesis_triggered(evt)
+    if kind == "thesis_resolved":
+        return _format_thesis_resolved(evt)
 
     icon, title = _POSITION_EVENT_TITLES[kind]
     title = f"{_test_prefix(evt)}{title}"
