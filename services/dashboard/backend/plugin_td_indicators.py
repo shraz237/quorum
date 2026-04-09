@@ -212,6 +212,87 @@ def _interpret_wti(r: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Multi-timeframe RSI — for scalp brain alignment check
+# ---------------------------------------------------------------------------
+
+def fetch_multi_tf_rsi(intervals: tuple[str, ...] = ("1min", "5min", "15min")) -> dict:
+    """Fetch RSI for WTI on multiple intraday timeframes in parallel.
+
+    Used by the scalp brain to check multi-TF alignment — when all three
+    timeframes are oversold and turning up (or overbought and turning
+    down), it's a high-conviction scalp setup.
+
+    Credit cost: 1 credit per interval. Cached for 60 seconds (we want
+    faster freshness than the 5-min cache used by the main indicator
+    fetcher — scalping needs live data). 3 intervals × 60 calls/hr =
+    180 credits/hr ≈ 3 credits/min.
+    """
+    cache_key = f"multi_tf_rsi_{'_'.join(intervals)}"
+    cached = _cache_get_with_ttl(cache_key, ttl_seconds=60)
+    if cached is not None:
+        return cached
+
+    result: dict = {}
+    with ThreadPoolExecutor(max_workers=len(intervals)) as executor:
+        futures = {
+            executor.submit(
+                _fetch_indicator, "/rsi", "WTI/USD", interval, {"time_period": 14}
+            ): interval
+            for interval in intervals
+        }
+        for future in as_completed(futures):
+            interval = futures[future]
+            try:
+                data = future.result(timeout=10)
+            except Exception:
+                data = None
+            if data and data.get("latest") and data["latest"].get("rsi") is not None:
+                latest_val = float(data["latest"]["rsi"])
+                prev_val = None
+                if data.get("previous") and data["previous"].get("rsi") is not None:
+                    try:
+                        prev_val = float(data["previous"]["rsi"])
+                    except (TypeError, ValueError):
+                        prev_val = None
+                # Direction: turning_up if latest > previous, turning_down otherwise
+                direction = None
+                if prev_val is not None:
+                    direction = "turning_up" if latest_val > prev_val else "turning_down"
+                # Zone
+                if latest_val >= 70:
+                    zone = "overbought"
+                elif latest_val >= 55:
+                    zone = "bullish"
+                elif latest_val >= 45:
+                    zone = "neutral"
+                elif latest_val >= 30:
+                    zone = "bearish"
+                else:
+                    zone = "oversold"
+                result[interval] = {
+                    "rsi": round(latest_val, 2),
+                    "prev_rsi": round(prev_val, 2) if prev_val is not None else None,
+                    "zone": zone,
+                    "direction": direction,
+                }
+
+    out = {"intervals": result}
+    _cache_set(cache_key, out)
+    return out
+
+
+def _cache_get_with_ttl(key: str, ttl_seconds: int) -> dict | None:
+    """Variant of _cache_get that lets callers override the TTL."""
+    with _CACHE_LOCK:
+        entry = _CACHE.get(key)
+        if entry is None:
+            return None
+        if time.time() - entry["ts"] > ttl_seconds:
+            return None
+        return entry["data"]
+
+
+# ---------------------------------------------------------------------------
 # Cross-asset stress meter — RSI on SPY, BTC, UUP
 # ---------------------------------------------------------------------------
 

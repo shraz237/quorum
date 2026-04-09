@@ -33,6 +33,13 @@ interface ScalpingRange {
     width: number;
     width_pct: number;
   };
+  realtime_range?: {
+    low: number;
+    mid: number;
+    high: number;
+    width: number;
+    window_minutes: number;
+  };
   atr_5m: number;
   atr_pct: number;
   volatility_regime: "tight" | "normal" | "wide" | "unknown";
@@ -113,7 +120,7 @@ const SetupCard: React.FC<{
 };
 
 const ScalpingRangePanel: React.FC = () => {
-  const { data } = useApi<ScalpingRange>("/api/scalping-range?timeframe=5min&lookback_hours=4", {
+  const { data } = useApi<ScalpingRange>("/api/scalping-range?timeframe=5min&lookback_hours=2", {
     pollInterval: 10_000,
   });
 
@@ -206,6 +213,22 @@ const ScalpingRangePanel: React.FC = () => {
               range {data.range.width_pct.toFixed(2)}% wide
             </span>
           </div>
+          {/* Realtime 30-min range — cannot get stuck on old prints */}
+          {data.realtime_range && (
+            <div className="mt-2 flex items-center justify-between text-[10px] font-mono bg-gray-800/40 rounded px-2 py-1">
+              <span className="text-gray-500 uppercase tracking-wider">
+                Live {data.realtime_range.window_minutes}m
+              </span>
+              <span className="text-gray-300">
+                L <span className="text-red-300">${data.realtime_range.low.toFixed(3)}</span>
+                <span className="mx-1 text-gray-600">·</span>
+                M <span className="text-gray-100">${data.realtime_range.mid.toFixed(3)}</span>
+                <span className="mx-1 text-gray-600">·</span>
+                H <span className="text-green-300">${data.realtime_range.high.toFixed(3)}</span>
+                <span className="ml-2 text-gray-500">(${data.realtime_range.width.toFixed(3)} wide)</span>
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Both setups side by side */}

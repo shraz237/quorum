@@ -511,10 +511,101 @@ def get_market_sessions_endpoint() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@app.get("/api/scalp-brain")
+def get_scalp_brain_endpoint() -> dict[str, Any]:
+    """Ultimate scalper verdict — stitches every intraday signal into
+    one LONG NOW / SHORT NOW / LEAN / WAIT answer with entry/SL/TP levels.
+
+    Reads are 10-second cached so repeated polls don't hammer downstream
+    services. Also fires a Telegram alert the first time the verdict
+    transitions into LONG NOW or SHORT NOW (5-minute cooldown per side).
+    """
+    try:
+        from plugin_scalp_brain import get_scalp_brain
+        data = get_scalp_brain()
+
+        # Alert-on-transition: only when the verdict actually changes into
+        # a NOW state from something else. Cooldown per side via Redis.
+        _maybe_fire_scalp_brain_alert(data)
+
+        return {"data": data}
+    except Exception as exc:
+        logger.exception("scalp-brain endpoint failed")
+        return {"error": str(exc)}
+
+
+_SCALP_BRAIN_ALERT_COOLDOWN_SECONDS = 300  # 5 minutes per side
+_SCALP_BRAIN_LAST_VERDICT_KEY = "scalp_brain:last_verdict"
+_SCALP_BRAIN_LAST_ALERT_KEY = "scalp_brain:last_alert_ts:{side}"
+
+
+def _maybe_fire_scalp_brain_alert(data: dict) -> None:
+    """Publish a scalp_brain_alert event when the verdict first turns NOW.
+
+    Side-effect only — silently swallows errors (alerting must never break
+    the read endpoint).
+    """
+    verdict = data.get("verdict")
+    if verdict not in ("LONG", "SHORT"):
+        return
+    try:
+        from shared.redis_streams import get_redis, publish
+        import time as _time
+        r = get_redis()
+
+        # Read previous verdict
+        prev_raw = r.get(_SCALP_BRAIN_LAST_VERDICT_KEY)
+        if isinstance(prev_raw, bytes):
+            prev = prev_raw.decode("utf-8")
+        else:
+            prev = prev_raw if prev_raw else None
+        r.set(_SCALP_BRAIN_LAST_VERDICT_KEY, verdict)
+
+        # Only alert on transition into NOW state (not every poll while in it)
+        if prev == verdict:
+            return
+
+        # Per-side cooldown
+        side_key = _SCALP_BRAIN_LAST_ALERT_KEY.format(side=verdict)
+        last_raw = r.get(side_key)
+        if isinstance(last_raw, bytes):
+            last = last_raw.decode("utf-8")
+        else:
+            last = last_raw if last_raw else None
+        now_ts = _time.time()
+        if last is not None:
+            try:
+                if (now_ts - float(last)) < _SCALP_BRAIN_ALERT_COOLDOWN_SECONDS:
+                    return
+            except (TypeError, ValueError):
+                pass
+        r.set(side_key, str(now_ts))
+
+        levels = data.get("trade_levels") or {}
+        publish(
+            "position.event",
+            {
+                "type": "scalp_brain_alert",
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "verdict": verdict,
+                "current_price": data.get("current_price"),
+                "conviction_pct": data.get("conviction_pct"),
+                "entry": levels.get("entry"),
+                "stop_loss": levels.get("stop_loss"),
+                "take_profit_1": levels.get("take_profit_1"),
+                "take_profit_2": levels.get("take_profit_2"),
+                "rr_tp1": levels.get("rr_tp1"),
+                "why": data.get("why"),
+            },
+        )
+    except Exception:
+        logger.exception("scalp-brain alert publish failed")
+
+
 @app.get("/api/scalping-range")
 def get_scalping_range_endpoint(
     timeframe: str = Query(default="5min"),
-    lookback_hours: int = Query(default=4, ge=1, le=24),
+    lookback_hours: int = Query(default=2, ge=1, le=24),
 ) -> dict[str, Any]:
     """Short-timeframe scalping range + suggested long/short entries with SL/TP."""
     try:

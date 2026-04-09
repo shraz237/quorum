@@ -122,7 +122,55 @@ _POSITION_EVENT_TITLES = {
     "campaign_hard_stop":    ("\U0001f6d1", "Campaign HARD STOP HIT"),
     # Heartbeat Opus position manager actions
     "heartbeat_action":      ("\U0001fac0", "Heartbeat Action"),             # anatomical heart
+    # Scalp brain — ultimate scalper verdict transitions
+    "scalp_brain_alert":     ("\u26a1",     "Scalp Brain"),                  # lightning
 }
+
+
+def _format_scalp_brain_alert(evt: dict) -> str:
+    """Format a scalp_brain_alert event into a Telegram message.
+
+    Fires on verdict transitions into LONG NOW / SHORT NOW with a 5-min
+    per-side cooldown handled on the publisher side.
+    """
+    verdict = str(evt.get("verdict", "")).upper()
+    icon = "\U0001f7e2" if verdict == "LONG" else "\U0001f534" if verdict == "SHORT" else "\u26a1"
+    current = evt.get("current_price")
+    conviction = evt.get("conviction_pct")
+
+    title = f"Scalp {verdict} NOW"
+    lines = [f"{icon} *{title}*"]
+    if current is not None:
+        try:
+            lines.append(f"Price: `${float(current):.3f}`  •  Conviction {int(conviction or 0)}%")
+        except (TypeError, ValueError):
+            pass
+    lines.append("")
+
+    entry = evt.get("entry")
+    sl = evt.get("stop_loss")
+    tp1 = evt.get("take_profit_1")
+    tp2 = evt.get("take_profit_2")
+    rr = evt.get("rr_tp1")
+    if entry is not None and sl is not None and tp1 is not None:
+        try:
+            lines.append(f"Entry `${float(entry):.3f}`")
+            lines.append(f"SL    `${float(sl):.3f}`")
+            lines.append(f"TP1  `${float(tp1):.3f}`  •  R:R `{float(rr or 0):.2f}`")
+            if tp2 is not None:
+                lines.append(f"TP2  `${float(tp2):.3f}`")
+        except (TypeError, ValueError):
+            pass
+
+    why = evt.get("why")
+    if why:
+        lines += ["", f"_{why}_"]
+
+    ts = evt.get("timestamp")
+    if ts:
+        lines += ["", f"_at {ts}_"]
+
+    return "\n".join(lines)
 
 
 def _format_heartbeat_action(evt: dict) -> str:
@@ -250,6 +298,8 @@ def format_position_event(evt: dict) -> str | None:
     # Heartbeat events have their own custom formatter (different field shape)
     if kind == "heartbeat_action":
         return _format_heartbeat_action(evt)
+    if kind == "scalp_brain_alert":
+        return _format_scalp_brain_alert(evt)
 
     icon, title = _POSITION_EVENT_TITLES[kind]
     side = str(evt.get("side", "")).upper()

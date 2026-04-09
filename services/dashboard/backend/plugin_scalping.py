@@ -98,9 +98,16 @@ def _current_zone(price: float, lo: float, mid: float, hi: float) -> str:
 
 def compute_scalping_range(
     timeframe: str = "5min",
-    lookback_hours: int = 4,
+    lookback_hours: int = 2,
 ) -> dict:
-    """Main entry point — returns a full scalping snapshot."""
+    """Main entry point — returns a full scalping snapshot.
+
+    The "percentile range" uses a tighter 2-hour window (was 4h) to stop
+    old prints from staying stuck in the 85th/15th percentile. On top of
+    that, we surface a separate REALTIME 30-min high/low so the UI never
+    looks anchored to prints that have already dropped out of the scalp
+    relevance window.
+    """
     since = datetime.now(tz=timezone.utc) - timedelta(hours=lookback_hours)
     symbol = (settings.binance_symbol or "CLUSDT").upper()
 
@@ -121,13 +128,30 @@ def compute_scalping_range(
             "error": f"need at least 20 {timeframe} bars, only {len(bars)} available",
         }
 
-    # Basic range
+    # Basic range — 85th/15th percentile over the full lookback window
     highs = [b.high for b in bars]
     lows = [b.low for b in bars]
     range_high = round(_percentile(highs, 0.85), 3)
     range_low = round(_percentile(lows, 0.15), 3)
     range_mid = round((range_high + range_low) / 2, 3)
     range_width = range_high - range_low
+
+    # Realtime range — last 30 minutes, plain high/low (no percentile).
+    # This is what the UI shows as the "live" range. It updates instantly
+    # as prints come in and drop out after 30 minutes — so it can never
+    # get stuck on old levels the way the percentile range can.
+    rt_cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+    rt_bars = [b for b in bars if b.timestamp >= rt_cutoff]
+    if rt_bars:
+        realtime_high = round(max(b.high for b in rt_bars), 3)
+        realtime_low = round(min(b.low for b in rt_bars), 3)
+    else:
+        # Fall back to the last ~6 bars (30 min of 5-min data) if the timestamp
+        # comparison hits none — e.g. during a collector hiccup
+        tail = bars[-6:]
+        realtime_high = round(max(b.high for b in tail), 3)
+        realtime_low = round(min(b.low for b in tail), 3)
+    realtime_mid = round((realtime_high + realtime_low) / 2, 3)
 
     current_price = bars[-1].close
     atr = _atr_from_bars(bars)
@@ -245,6 +269,14 @@ def compute_scalping_range(
             "high": range_high,
             "width": round(range_width, 3),
             "width_pct": round(range_width / current_price * 100, 3),
+        },
+        # Realtime 30-min high/low — cannot get stuck on old prints
+        "realtime_range": {
+            "low": realtime_low,
+            "mid": realtime_mid,
+            "high": realtime_high,
+            "width": round(realtime_high - realtime_low, 3),
+            "window_minutes": 30,
         },
         "atr_5m": round(atr, 3),
         "atr_pct": atr_pct,

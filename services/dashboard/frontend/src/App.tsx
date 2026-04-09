@@ -18,6 +18,7 @@ import CrossContextPanel from "./components/CrossContextPanel";
 import LearningPanel from "./components/LearningPanel";
 import LivePriceTicker from "./components/LivePriceTicker";
 import HeartbeatPill from "./components/HeartbeatPill";
+import ScalpBrainPanel from "./components/ScalpBrainPanel";
 import ScalpingRangePanel from "./components/ScalpingRangePanel";
 import TwelveSensorPanel from "./components/TwelveSensorPanel";
 
@@ -207,6 +208,9 @@ const App: React.FC = () => {
 
       {/* Account Panel */}
       <AccountPanel />
+
+      {/* Scalp Brain — one-panel verdict stitching every intraday signal */}
+      <ScalpBrainPanel />
 
       {/* Scalping Range — 5-min entries for intraday scalping */}
       <ScalpingRangePanel />
