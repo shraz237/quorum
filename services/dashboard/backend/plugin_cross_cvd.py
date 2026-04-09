@@ -30,7 +30,18 @@ from shared.models.ohlcv import OHLCV
 logger = logging.getLogger(__name__)
 
 _SYMBOL = "CLUSDT"
-_CROSS_ASSETS = ["DXY", "SPX", "GOLD", "BTC", "VIX"]
+_CROSS_ASSETS = [
+    "DXY",       # real computed from forex basket (not ETF proxy)
+    "SPX",       # via SPY ETF
+    "GOLD",      # XAU/USD spot
+    "BTC",       # BTC/USD
+    "ETH",       # ETH/USD (risk-on barometer)
+    "SOL",       # SOL/USD (high-beta risk-on)
+    "VIX",       # via VIXY ETF
+    "EURUSD",    # major forex
+    "USDJPY",    # safe-haven JPY
+    "GBPUSD",    # UK exposure
+]
 
 
 # ---------------------------------------------------------------------------

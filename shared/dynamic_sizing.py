@@ -218,6 +218,24 @@ def compute_size_multiplier(
         multiplier *= 1.1
         reasons.append(f"tight 5m ATR {atr_pct:.2f}% × 1.1 bonus")
 
+    # ---------- Market session multiplier ----------
+    # US/London open = full liquidity, Asia-only = thin, all-closed = holiday.
+    # Lazy import so shared/ doesn't hard-depend on dashboard plugin.
+    try:
+        import sys
+        if "/app" not in sys.path:
+            sys.path.insert(0, "/app")
+        from plugin_market_sessions import get_market_state  # type: ignore
+        session_state = get_market_state()
+        session_mult = session_state.get("sizing_multiplier", 1.0)
+        regime = session_state.get("regime", "unknown")
+        if session_mult != 1.0:
+            multiplier *= session_mult
+            reasons.append(f"session '{regime}' × {session_mult}")
+        state["market_regime"] = regime
+    except Exception:
+        pass  # session check is best-effort, never block sizing
+
     multiplier = clamp_multiplier(multiplier)
 
     info = {

@@ -18,6 +18,7 @@ import CrossContextPanel from "./components/CrossContextPanel";
 import LearningPanel from "./components/LearningPanel";
 import LivePriceTicker from "./components/LivePriceTicker";
 import ScalpingRangePanel from "./components/ScalpingRangePanel";
+import TwelveSensorPanel from "./components/TwelveSensorPanel";
 
 // ---------------------------------------------------------------------------
 // Types matching the backend JSON
@@ -207,6 +208,9 @@ const App: React.FC = () => {
 
       {/* Scalping Range — 5-min entries for intraday scalping */}
       <ScalpingRangePanel />
+
+      {/* Twelve Data sensors — sessions, WTI indicators, cross-asset stress */}
+      <TwelveSensorPanel />
 
       {/* Risk & Scenario Tools — scenario calculator, Monte Carlo, VWAP, calendar */}
       <RiskToolsPanel />

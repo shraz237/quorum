@@ -461,6 +461,39 @@ def get_cvd_endpoint(minutes: int = Query(default=60, ge=5, le=500)) -> dict[str
         return {"error": str(exc)}
 
 
+@app.get("/api/td-indicators/wti")
+def get_td_indicators_wti(interval: str = Query(default="1h")) -> dict[str, Any]:
+    """Twelve Data pre-computed RSI/MACD/ATR/ADX/BBANDS for WTI."""
+    try:
+        from plugin_td_indicators import fetch_wti_indicators
+        return {"data": fetch_wti_indicators(interval=interval)}
+    except Exception as exc:
+        logger.exception("td-indicators wti failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/td-indicators/cross-stress")
+def get_td_cross_stress_endpoint() -> dict[str, Any]:
+    """1h RSI for SPY, BTC/USD, UUP — macro stress barometers."""
+    try:
+        from plugin_td_indicators import fetch_cross_asset_stress
+        return {"data": fetch_cross_asset_stress()}
+    except Exception as exc:
+        logger.exception("td-cross-stress failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/market-sessions")
+def get_market_sessions_endpoint() -> dict[str, Any]:
+    """Current global market session state + sizing-regime label."""
+    try:
+        from plugin_market_sessions import get_market_state
+        return {"data": get_market_state()}
+    except Exception as exc:
+        logger.exception("market-sessions failed")
+        return {"error": str(exc)}
+
+
 @app.get("/api/scalping-range")
 def get_scalping_range_endpoint(
     timeframe: str = Query(default="5min"),
