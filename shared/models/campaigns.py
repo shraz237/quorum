@@ -40,6 +40,15 @@ class Campaign(Base):
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)  # set on close
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Dynamic size multiplier applied to every DCA layer of this campaign.
+    # Computed once at open from current market state; 0.5 .. 3.0.
+    # Rows created before this column was added default to 1.0.
+    size_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+
+    # JSONB with the full sizing reasoning (base, reasons, state inputs)
+    # so the dashboard can show "why the bot sized this way".
+    sizing_info: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     # Trade journal snapshots — captured at open and close for feedback-loop
     # analytics. Free-form JSONB so we can evolve the shape without migrations.
     # Typical entry_snapshot keys: scores, conviction, funding, oi, orderbook,

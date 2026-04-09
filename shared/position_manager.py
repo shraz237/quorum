@@ -306,7 +306,8 @@ def compute_campaign_state(campaign_id: int, current_price: float | None = None)
         else:
             unrealised_pnl_pct = 0.0
 
-        next_margin = next_layer_margin(layers_used)
+        campaign_multiplier = float(campaign.size_multiplier or 1.0)
+        next_margin = next_layer_margin(layers_used, multiplier=campaign_multiplier)
 
         positions_data = [_position_to_layer_dict(p, current_price) for p in open_pos]
 
@@ -361,6 +362,8 @@ def compute_campaign_state(campaign_id: int, current_price: float | None = None)
             "layers_used": layers_used,
             "max_layers": len(DCA_LAYERS_MARGIN),
             "next_layer_margin": next_margin,
+            "size_multiplier": round(campaign_multiplier, 3),
+            "sizing_info": campaign.sizing_info,
             "current_price": current_price,
             "unrealised_pnl": round(unrealised_pnl, 2),
             "unrealised_pnl_pct": unrealised_pnl_pct,
@@ -406,16 +409,68 @@ def list_campaigns(status: str | None = None, limit: int = 50) -> list[dict]:
     return [compute_campaign_state(cid, current_price) for cid in ids if cid is not None]
 
 
-def open_new_campaign(side: str, current_price: float) -> int:
+def open_new_campaign(
+    side: str,
+    current_price: float,
+    llm_confidence: float | None = None,
+) -> int | None:
     """Create a Campaign row and open the first DCA layer (layer 0).
 
-    Returns the campaign id.
+    Size is determined dynamically:
+      - Base Layer-0 margin from DCA_LAYERS_MARGIN_BASE[0]
+      - Multiplied by compute_size_multiplier() based on current state
+        (unified score, LLM confidence, funding, drawdown, volatility)
+      - Capped by the 80%-equity safety net via apply_equity_cap()
+
+    The multiplier + reasoning are persisted on the Campaign row so the
+    dashboard can show "why the bot sized this way" and every subsequent
+    DCA layer on this campaign uses the same multiplier.
+
+    Returns the campaign id, or None if the equity cap zeroed out the size.
     """
+    from shared.dynamic_sizing import (
+        apply_equity_cap,
+        compute_size_multiplier,
+    )
+    from shared.sizing import DCA_LAYERS_MARGIN_BASE
+
     side_norm = side.upper()
     if side_norm not in ("LONG", "SHORT"):
         raise ValueError(f"Invalid side: {side}")
 
-    margin = DCA_LAYERS_MARGIN[0]
+    # Compute multiplier + sizing info from current market state
+    from shared.dynamic_sizing import _gather_sizing_state
+    state = _gather_sizing_state(side=side_norm)
+    multiplier, sizing_info = compute_size_multiplier(
+        state=state,
+        llm_confidence=llm_confidence,
+    )
+
+    base_margin = DCA_LAYERS_MARGIN_BASE[0]
+    raw_margin = base_margin * multiplier
+
+    # Equity safety net
+    equity = state.get("equity") or 0
+    already_locked = state.get("margin_used") or 0
+    margin = apply_equity_cap(raw_margin, equity, already_locked)
+    if margin <= 0:
+        logger.warning(
+            "open_new_campaign refused: equity cap zeroed out margin "
+            "(equity=%.0f already_locked=%.0f requested=%.0f)",
+            equity, already_locked, raw_margin,
+        )
+        return None
+
+    if margin < raw_margin:
+        sizing_info.setdefault("reasons", []).append(
+            f"equity cap: requested ${raw_margin:.0f} → ${margin:.0f} "
+            f"(max 80% of ${equity:.0f} equity)"
+        )
+        logger.warning(
+            "open_new_campaign: equity cap reduced margin %.0f -> %.0f",
+            raw_margin, margin,
+        )
+
     lots = lots_from_margin(margin, current_price)
     nom = lots * 100 * current_price
 
@@ -427,6 +482,8 @@ def open_new_campaign(side: str, current_price: float) -> int:
             side=side_norm,
             status="open",
             max_loss_pct=HARD_STOP_DRAWDOWN_PCT,
+            size_multiplier=multiplier,
+            sizing_info=sizing_info,
         )
         session.add(campaign)
         session.flush()  # get campaign.id before committing
@@ -447,12 +504,13 @@ def open_new_campaign(side: str, current_price: float) -> int:
     )
 
     logger.info(
-        "Opened campaign #%s %s @ %.2f (layer 0, lots=%.4f, margin=%.0f)",
+        "Opened campaign #%s %s @ %.2f (layer 0, lots=%.4f, margin=%.0f, "
+        "multiplier=%.2fx base=%.0f)",
         campaign_id, side_norm, current_price, lots, margin,
+        multiplier, base_margin,
     )
 
-    # Capture entry snapshot for the trade journal (best-effort — never
-    # let snapshot persistence break campaign open).
+    # Capture entry snapshot for the trade journal (best-effort).
     try:
         from shared.trade_snapshot import attach_entry_snapshot
         attach_entry_snapshot(campaign_id, reason="campaign_open")
@@ -465,24 +523,48 @@ def open_new_campaign(side: str, current_price: float) -> int:
 def add_dca_layer(campaign_id: int, current_price: float) -> int | None:
     """Open the next DCA layer position in the campaign.
 
-    Returns the new position id, or None if all layers are exhausted.
+    Uses the campaign's stored size_multiplier so the proportional size
+    stays consistent across layers. Equity cap is re-checked on every
+    layer so a DCA that would exceed 80% total exposure is refused.
     """
+    from shared.dynamic_sizing import apply_equity_cap
+    from shared.account_manager import recompute_account_state
+
     with SessionLocal() as session:
         campaign = session.query(Campaign).filter(Campaign.id == campaign_id).first()
         if campaign is None or campaign.status != "open":
             return None
 
         campaign_side = campaign.side  # read while session is open
+        campaign_multiplier = float(campaign.size_multiplier or 1.0)
         layers_used = (
             session.query(Position)
             .filter(Position.campaign_id == campaign_id, Position.status == "open")
             .count()
         )
 
-    margin = next_layer_margin(layers_used)
-    if margin is None:
+    raw_margin = next_layer_margin(layers_used, multiplier=campaign_multiplier)
+    if raw_margin is None:
         logger.info("Campaign #%s: all DCA layers exhausted", campaign_id)
         return None
+
+    # Equity safety net — refuse if this layer would push us over 80%
+    acc = recompute_account_state()
+    equity = acc.get("equity") or 0
+    already_locked = acc.get("margin_used") or 0
+    margin = apply_equity_cap(raw_margin, equity, already_locked)
+    if margin <= 0:
+        logger.warning(
+            "add_dca_layer #%s refused: equity cap hit "
+            "(equity=%.0f already_locked=%.0f requested=%.0f)",
+            campaign_id, equity, already_locked, raw_margin,
+        )
+        return None
+    if margin < raw_margin:
+        logger.warning(
+            "add_dca_layer #%s: equity cap reduced margin %.0f -> %.0f",
+            campaign_id, raw_margin, margin,
+        )
 
     lots = lots_from_margin(margin, current_price)
     nom = lots * 100 * current_price

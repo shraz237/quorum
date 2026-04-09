@@ -145,15 +145,26 @@ def _handle_campaign_signal(new_side: str, conf: float, rec: dict) -> None:
     open_camps = list_open_campaigns()
 
     if not open_camps:
-        # No open campaign — open a new one if we have margin for layer 0
-        layer0_margin = DCA_LAYERS_MARGIN[0]
-        if free_margin < layer0_margin:
+        # No open campaign — open a new one if we have margin. The
+        # dynamic sizer will compute the actual layer-0 margin and
+        # enforce the 80%-equity cap; we just do a cheap pre-check
+        # using the BASE schedule so we don't even call the sizer
+        # when we're obviously out of cash.
+        layer0_base = DCA_LAYERS_MARGIN[0]
+        if free_margin < layer0_base * 0.5:  # even at 0.5x multiplier
             logger.info(
-                "Skipping campaign open — free_margin %.2f < layer0 %.2f",
-                free_margin, layer0_margin,
+                "Skipping campaign open — free_margin %.2f < minimum layer0 %.2f",
+                free_margin, layer0_base * 0.5,
             )
             return
-        campaign_id = open_new_campaign(new_side, current_price)
+        campaign_id = open_new_campaign(
+            new_side, current_price, llm_confidence=conf,
+        )
+        if campaign_id is None:
+            logger.warning(
+                "open_new_campaign returned None (equity cap?) — no action"
+            )
+            return
         _publish_position_event(
             "campaign_opened",
             {
@@ -161,6 +172,7 @@ def _handle_campaign_signal(new_side: str, conf: float, rec: dict) -> None:
                 "side": new_side,
                 "entry_price": current_price,
                 "layer": 0,
+                "reason": (rec.get("reasoning") or "")[:200],
             },
         )
         return

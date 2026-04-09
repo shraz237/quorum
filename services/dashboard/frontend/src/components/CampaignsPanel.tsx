@@ -25,6 +25,13 @@ interface DcaPreviewRow {
   new_breakeven: number;
 }
 
+interface SizingInfo {
+  multiplier: number;
+  base: number;
+  reasons: string[];
+  state?: Record<string, number | string | null>;
+}
+
 interface Campaign {
   id: number;
   side: "LONG" | "SHORT";
@@ -38,6 +45,8 @@ interface Campaign {
   layers_used: number;
   max_layers: number;
   next_layer_margin: number | null;
+  size_multiplier?: number;
+  sizing_info?: SizingInfo | null;
   current_price: number | null;
   unrealised_pnl: number;
   unrealised_pnl_pct: number;
@@ -203,6 +212,24 @@ const CampaignCard: React.FC<CampaignCardProps> = ({ campaign, onRefetch }) => {
         <span className="text-sm font-semibold text-gray-300">
           Campaign #{c.id}
         </span>
+
+        {/* Size multiplier badge */}
+        {c.size_multiplier != null && c.size_multiplier !== 1.0 && (
+          <span
+            title={c.sizing_info?.reasons?.join(" · ")}
+            className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${
+              c.size_multiplier >= 2.5
+                ? "bg-purple-900/50 border-purple-700 text-purple-200"
+                : c.size_multiplier >= 1.5
+                ? "bg-blue-900/50 border-blue-700 text-blue-200"
+                : c.size_multiplier >= 1.0
+                ? "bg-gray-800 border-gray-700 text-gray-300"
+                : "bg-yellow-900/40 border-yellow-800 text-yellow-300"
+            }`}
+          >
+            {c.size_multiplier.toFixed(2)}× size
+          </span>
+        )}
 
         {/* Opened time */}
         <span className="text-[10px] text-gray-500">{fmtTime(c.opened_at)}</span>
@@ -399,6 +426,37 @@ const CampaignCard: React.FC<CampaignCardProps> = ({ campaign, onRefetch }) => {
                 {c.side === "LONG"
                   ? "Dips (negative offsets) improve your avg entry and lower breakeven"
                   : "Rallies (positive offsets) improve your avg entry and raise breakeven"}
+              </div>
+            </div>
+          )}
+
+          {/* Sizing reasoning — why the bot chose this multiplier */}
+          {c.sizing_info && c.size_multiplier != null && (
+            <div>
+              <div className="flex items-baseline justify-between mb-1">
+                <span className="text-[10px] uppercase tracking-widest text-gray-500">
+                  Dynamic Sizing
+                </span>
+                <span className="text-[10px] text-gray-600">
+                  {c.size_multiplier.toFixed(2)}× (base {c.sizing_info.base?.toFixed(2)}×)
+                </span>
+              </div>
+              <div className="bg-gray-800/40 rounded p-2 space-y-1">
+                <div className="text-[10px] text-gray-400">Why this size:</div>
+                <ul className="text-[10px] text-gray-300 space-y-0.5">
+                  {c.sizing_info.reasons?.map((r, i) => (
+                    <li key={i}>• {r}</li>
+                  ))}
+                </ul>
+                {c.sizing_info.state && (
+                  <div className="text-[9px] text-gray-600 pt-1 border-t border-gray-800/70 mt-1">
+                    inputs:{" "}
+                    {Object.entries(c.sizing_info.state)
+                      .filter(([, v]) => v != null)
+                      .map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(3) : v}`)
+                      .join(" · ")}
+                  </div>
+                )}
               </div>
             </div>
           )}
