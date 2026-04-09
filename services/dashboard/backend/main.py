@@ -1123,6 +1123,14 @@ def close_campaign_endpoint(campaign_id: int) -> dict[str, Any]:
     except Exception:
         logger.exception("Failed to publish campaign_manual_close event")
 
+    # Arm heartbeat hot window — we just closed a campaign and want
+    # aggressive monitoring for the next 5 min (re-entry, opposite, etc.)
+    try:
+        from shared.heartbeat_hot import arm_hot_window
+        arm_hot_window(reason=f"dashboard closed #{campaign_id}")
+    except Exception:
+        logger.exception("Failed to arm hot window after dashboard close")
+
     return {"data": snap}
 
 
@@ -1152,6 +1160,13 @@ def add_dca_layer_endpoint(campaign_id: int) -> dict[str, Any]:
     except Exception:
         logger.exception("Failed to publish dca_layer_added event")
 
+    # Arm heartbeat hot window — new DCA layer means new exposure to monitor
+    try:
+        from shared.heartbeat_hot import arm_hot_window
+        arm_hot_window(reason=f"DCA added to #{campaign_id}")
+    except Exception:
+        logger.exception("Failed to arm hot window after DCA add")
+
     state = compute_campaign_state(campaign_id)
     return {"data": state}
 
@@ -1175,6 +1190,13 @@ def close_position_endpoint(position_id: int) -> dict[str, Any]:
         publish("position.event", {"type": "manual_close", **snap, "timestamp": datetime.now(tz=timezone.utc).isoformat()})
     except Exception:
         logger.exception("Failed to publish manual_close event")
+
+    # Arm heartbeat hot window — position just closed, monitor transition
+    try:
+        from shared.heartbeat_hot import arm_hot_window
+        arm_hot_window(reason="dashboard position close")
+    except Exception:
+        logger.exception("Failed to arm hot window after dashboard position close")
 
     return {"data": snap}
 

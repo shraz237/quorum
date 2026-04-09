@@ -142,8 +142,24 @@ def _should_publish_recommendation(rec: dict) -> bool:
         return True
 
 
+_CAMPAIGN_HOT_EVENTS = {
+    "campaign_opened",
+    "campaign_manual_close",
+    "campaign_tp",
+    "campaign_hard_stop",
+    "tp_hit",
+    "sl_hit",
+    "strategy_close",
+}
+
+
 def _publish_position_event(kind: str, snap: dict) -> None:
-    """Publish a position lifecycle event to the notifier."""
+    """Publish a position lifecycle event to the notifier.
+
+    Also arms the heartbeat hot window (30s ticks for 5 min) on any
+    campaign open/close transition so Opus aggressively monitors the
+    new state and can react fast if the setup was wrong.
+    """
     payload = {
         "type": kind,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -154,6 +170,13 @@ def _publish_position_event(kind: str, snap: dict) -> None:
         logger.info("Published position.%s for #%s", kind, snap.get("id"))
     except Exception:
         logger.exception("Failed to publish position event")
+
+    if kind in _CAMPAIGN_HOT_EVENTS:
+        try:
+            from shared.heartbeat_hot import arm_hot_window
+            arm_hot_window(reason=f"event={kind}")
+        except Exception:
+            logger.exception("Failed to arm heartbeat hot window on %s", kind)
 
 
 def _handle_campaign_signal(new_side: str, conf: float, rec: dict) -> None:
@@ -609,6 +632,13 @@ def main() -> None:
     from heartbeat import run_worker_loop as _heartbeat_loop
     threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
     logger.info("Heartbeat worker thread started")
+
+    # Start the theses watcher (triggers) and resolver (outcomes)
+    from theses_workers import run_watcher_loop as _theses_watcher
+    from theses_workers import run_resolver_loop as _theses_resolver
+    threading.Thread(target=_theses_watcher, daemon=True, name="theses-watcher").start()
+    threading.Thread(target=_theses_resolver, daemon=True, name="theses-resolver").start()
+    logger.info("Theses watcher + resolver threads started")
 
     for msg_id, data in subscribe(STREAM_IN, group=GROUP, consumer=CONSUMER, block=10_000):
         logger.info("Received scores event %s", msg_id)

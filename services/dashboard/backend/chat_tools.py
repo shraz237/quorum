@@ -179,6 +179,93 @@ TOOLS = [
             "required": ["side", "reason"],
         },
     },
+    # -------------------------------------------------------------------
+    # Thesis tools — forward-looking plans with auto-triggered alerts
+    # -------------------------------------------------------------------
+    {
+        "name": "create_thesis",
+        "description": (
+            "Save a forward-looking conditional plan. Use this when the user says things like "
+            "'remember if price drops to 95 I want to go long', 'watch for a short above 100', "
+            "'if unified score flips negative I'll reconsider'. The thesis will be monitored "
+            "automatically and the user will get a Telegram alert when the trigger fires. "
+            "After the trigger, the system also tracks the outcome (did the plan work) for review. "
+            "Always fill in planned_entry/stop_loss/take_profit when the user describes a trade plan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short title, ≤ 120 chars"},
+                "thesis_text": {"type": "string", "description": "Full natural-language description"},
+                "reasoning": {"type": "string", "description": "Why the user believes this will work"},
+                "trigger_type": {
+                    "type": "string",
+                    "enum": [
+                        "price_cross_above",
+                        "price_cross_below",
+                        "score_above",
+                        "score_below",
+                        "time_elapsed",
+                        "news_keyword",
+                        "scalp_brain_state",
+                        "manual",
+                    ],
+                },
+                "trigger_params": {
+                    "type": "object",
+                    "description": (
+                        "Depends on trigger_type. "
+                        "price_cross_above/below: {price: number}. "
+                        "score_above/below: {score: number, score_key?: 'unified'}. "
+                        "time_elapsed: {minutes: number}. "
+                        "news_keyword: {keywords: [string, ...]}. "
+                        "scalp_brain_state: {state: 'LONG'|'SHORT'|'LEAN_LONG'|'LEAN_SHORT'|'WAIT'}. "
+                        "manual: {}"
+                    ),
+                },
+                "planned_action": {
+                    "type": "string",
+                    "enum": ["LONG", "SHORT", "CLOSE_EXISTING", "WATCH", "NONE"],
+                },
+                "planned_entry": {"type": ["number", "null"]},
+                "planned_stop_loss": {"type": ["number", "null"]},
+                "planned_take_profit": {"type": ["number", "null"]},
+                "planned_size_margin": {"type": ["number", "null"], "description": "USD margin (defaults to 3000)"},
+                "expires_in_hours": {"type": ["number", "null"], "description": "Optional — drop the thesis after N hours if never triggered"},
+            },
+            "required": ["title", "thesis_text", "trigger_type", "trigger_params", "planned_action"],
+        },
+    },
+    {
+        "name": "list_theses",
+        "description": (
+            "List forward-looking theses. Use when the user asks 'what are my open thesis', "
+            "'show me what I was waiting for', or to summarise pending / triggered / resolved plans."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "triggered", "resolved", "expired", "cancelled", "all"],
+                },
+                "domain": {"type": "string", "enum": ["campaign", "scalp", "all"]},
+                "limit": {"type": "integer", "default": 20},
+            },
+        },
+    },
+    {
+        "name": "cancel_thesis",
+        "description": "Cancel a pending thesis by id. Use when the user says 'forget about that plan for price 95'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thesis_id": {"type": "integer"},
+                "reason": {"type": "string"},
+            },
+            "required": ["thesis_id"],
+        },
+    },
 ]
 
 
@@ -214,7 +301,91 @@ def execute_tool(name: str, tool_input: dict) -> dict:
         return _add_dca_layer(**tool_input)
     if name == "open_new_campaign":
         return _open_new_campaign(**tool_input)
+    if name == "create_thesis":
+        return _create_thesis(**tool_input)
+    if name == "list_theses":
+        return _list_theses(**tool_input)
+    if name == "cancel_thesis":
+        return _cancel_thesis(**tool_input)
     return {"error": f"unknown tool: {name}"}
+
+
+# ---------------------------------------------------------------------------
+# Thesis tool implementations
+# ---------------------------------------------------------------------------
+
+def _create_thesis(
+    title: str,
+    thesis_text: str,
+    trigger_type: str,
+    trigger_params: dict,
+    planned_action: str,
+    reasoning: str | None = None,
+    planned_entry: float | None = None,
+    planned_stop_loss: float | None = None,
+    planned_take_profit: float | None = None,
+    planned_size_margin: float | None = None,
+    expires_in_hours: float | None = None,
+) -> dict:
+    from shared.theses import create_thesis
+    from shared.redis_streams import publish
+    expires_at = None
+    if expires_in_hours is not None and expires_in_hours > 0:
+        expires_at = datetime.now(tz=timezone.utc) + timedelta(hours=float(expires_in_hours))
+    new_id = create_thesis(
+        created_by="user_chat",
+        domain="campaign",
+        title=title,
+        thesis_text=thesis_text,
+        reasoning=reasoning,
+        trigger_type=trigger_type,
+        trigger_params=trigger_params,
+        planned_action=planned_action,
+        planned_entry=planned_entry,
+        planned_stop_loss=planned_stop_loss,
+        planned_take_profit=planned_take_profit,
+        planned_size_margin=planned_size_margin,
+        expires_at=expires_at,
+    )
+    if new_id is None:
+        return {"error": "failed to create thesis (validation or DB)"}
+    # Publish a thesis_created event so Telegram/notifier renders a confirmation
+    try:
+        publish(
+            "position.event",
+            {
+                "type": "thesis_created",
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "thesis_id": new_id,
+                "domain": "campaign",
+                "title": title,
+                "thesis_text": thesis_text,
+                "trigger_type": trigger_type,
+                "trigger_params": trigger_params,
+                "planned_action": planned_action,
+                "planned_entry": planned_entry,
+                "planned_stop_loss": planned_stop_loss,
+                "planned_take_profit": planned_take_profit,
+                "created_by": "user_chat",
+            },
+        )
+    except Exception:
+        logger.exception("Failed to publish thesis_created event")
+    return {"thesis_id": new_id, "title": title, "status": "pending"}
+
+
+def _list_theses(status: str | None = None, domain: str | None = None, limit: int = 20) -> dict:
+    from shared.theses import list_theses
+    d = None if domain in (None, "all") else domain
+    s = None if status in (None, "all") else status
+    rows = list_theses(domain=d, status=s, limit=limit)
+    return {"count": len(rows), "theses": rows}
+
+
+def _cancel_thesis(thesis_id: int, reason: str = "user_cancelled") -> dict:
+    from shared.theses import cancel_thesis
+    ok = cancel_thesis(thesis_id, reason=reason)
+    return {"cancelled": ok, "thesis_id": thesis_id}
 
 
 # ---------------------------------------------------------------------------

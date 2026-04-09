@@ -72,6 +72,13 @@ REDIS_KEY_LAST_RUN = "heartbeat:last_run_at"
 REDIS_KEY_NEXT_RUN = "heartbeat:next_run_at"
 REDIS_KEY_LAST_HASH = "heartbeat:last_context_hash"
 REDIS_KEY_LAST_HASH_TS = "heartbeat:last_context_hash_ts"
+# Hot window — when a campaign opens or closes, we switch to a faster
+# tick cadence (every 30s) for a short window so Opus is actively
+# monitoring the new position or validating the close. Set by ai-brain
+# when it publishes campaign_opened / campaign_*_close events.
+REDIS_KEY_HOT_UNTIL = "heartbeat:hot_until"
+HOT_WINDOW_SECONDS = 5 * 60  # 5 minutes of aggressive monitoring
+HOT_TICK_INTERVAL_SECONDS = 30  # tick every 30 seconds while hot
 LOCK_TTL_SECONDS = 120  # longer than a single Opus call (~30-60s)
 
 # Hash-gating config — skip the Opus call entirely when the decision
@@ -264,6 +271,45 @@ def set_enabled(enabled: bool) -> None:
         get_redis().set(REDIS_KEY_ENABLED, "true" if enabled else "false")
     except Exception:
         logger.exception("Failed to set heartbeat:enabled")
+
+
+def set_hot_window(duration_seconds: int = HOT_WINDOW_SECONDS) -> None:
+    """Activate fast-tick mode for `duration_seconds` from now.
+
+    Call this from ai-brain main.py whenever a campaign opens or closes —
+    the heartbeat loop will tick every HOT_TICK_INTERVAL_SECONDS instead
+    of HEARTBEAT_INTERVAL_SECONDS until the window expires. Used to
+    aggressively monitor new positions and validate closes.
+    """
+    try:
+        r = get_redis()
+        hot_until = time.time() + max(1, int(duration_seconds))
+        r.set(REDIS_KEY_HOT_UNTIL, str(hot_until))
+        logger.info("Heartbeat HOT window armed for %ds", duration_seconds)
+    except Exception:
+        logger.exception("Failed to set heartbeat hot window")
+
+
+def is_hot_window_active() -> bool:
+    """True if the hot window is currently in effect."""
+    try:
+        raw = _redis_str(get_redis().get(REDIS_KEY_HOT_UNTIL))
+        if raw is None:
+            return False
+        return time.time() < float(raw)
+    except Exception:
+        return False
+
+
+def hot_window_seconds_left() -> float:
+    try:
+        raw = _redis_str(get_redis().get(REDIS_KEY_HOT_UNTIL))
+        if raw is None:
+            return 0.0
+        remaining = float(raw) - time.time()
+        return max(0.0, remaining)
+    except Exception:
+        return 0.0
 
 
 def _acquire_lock() -> bool:
@@ -675,6 +721,13 @@ def _execute_decision(
                 "avg_entry": camp_ctx.get("avg_entry"),
             },
         )
+        # Arm the hot window — we just closed a position and want to
+        # aggressively reconsider for the next 5 min (re-entry? opposite?)
+        try:
+            from shared.heartbeat_hot import arm_hot_window
+            arm_hot_window(reason=f"heartbeat closed #{campaign_id}")
+        except Exception:
+            logger.exception("Failed to arm hot window after heartbeat close")
         return
 
     # --- UPDATE_LEVELS: validate + execute ---
@@ -808,7 +861,13 @@ def _compute_decision_signal(context: dict) -> str:
 
 def _should_skip_opus(new_hash: str) -> tuple[bool, dict]:
     """Return (skip, detail). Skips if Redis stored hash matches AND the
-    stored decision is still fresh (< HASH_MAX_SKIP_SECONDS old)."""
+    stored decision is still fresh (< HASH_MAX_SKIP_SECONDS old).
+
+    During the hot window (just after campaign open/close), we bypass the
+    hash gate entirely — we WANT fresh Opus reasoning during transitions.
+    """
+    if is_hot_window_active():
+        return False, {"reason": "hot window active — bypassing hash gate"}
     try:
         r = get_redis()
         prev_hash = _redis_str(r.get(REDIS_KEY_LAST_HASH))
@@ -1102,13 +1161,16 @@ def run_tick() -> dict:
 # ---------------------------------------------------------------------------
 
 def run_worker_loop() -> None:
-    """Long-running loop — call run_tick() every HEARTBEAT_INTERVAL_SECONDS.
+    """Long-running loop — call run_tick() every HEARTBEAT_INTERVAL_SECONDS
+    in normal mode, or every HOT_TICK_INTERVAL_SECONDS while the hot window
+    is active (~5 min after a campaign opens or closes).
 
     Designed to be started in a daemon thread from ai-brain/main.py.
     """
     logger.info(
-        "Heartbeat worker starting (interval=%d min, env_override=%s)",
+        "Heartbeat worker starting (normal=%dmin, hot=%ds, env_override=%s)",
         HEARTBEAT_INTERVAL_MINUTES,
+        HOT_TICK_INTERVAL_SECONDS,
         os.environ.get("HEARTBEAT_ENABLED", "<unset>"),
     )
 
@@ -1116,12 +1178,22 @@ def run_worker_loop() -> None:
     time.sleep(30)
 
     while True:
+        hot = is_hot_window_active()
+        tick_interval = HOT_TICK_INTERVAL_SECONDS if hot else HEARTBEAT_INTERVAL_SECONDS
+
         try:
-            next_run = datetime.now(tz=timezone.utc) + timedelta(seconds=HEARTBEAT_INTERVAL_SECONDS)
+            next_run = datetime.now(tz=timezone.utc) + timedelta(seconds=tick_interval)
             _set_timestamps(datetime.now(tz=timezone.utc), next_run)
             result = run_tick()
-            logger.info("Heartbeat tick result: %s", result)
+            if hot:
+                hot_left = hot_window_seconds_left()
+                logger.info(
+                    "Heartbeat [HOT %ds left] tick result: %s",
+                    int(hot_left), result,
+                )
+            else:
+                logger.info("Heartbeat tick result: %s", result)
         except Exception:
             logger.exception("Heartbeat tick crashed unexpectedly")
 
-        time.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        time.sleep(tick_interval)

@@ -21,6 +21,7 @@ from shared.models.anomalies import Anomaly
 from shared.models.signal_snapshots import SignalSnapshot
 from shared.models.heartbeat_runs import HeartbeatRun
 from shared.models.llm_usage import LlmUsage
+from shared.models.theses import Thesis
 
 __all__ = [
     "Base",
@@ -53,4 +54,5 @@ __all__ = [
     "SignalSnapshot",
     "HeartbeatRun",
     "LlmUsage",
+    "Thesis",
 ]
