@@ -461,6 +461,23 @@ def get_cvd_endpoint(minutes: int = Query(default=60, ge=5, le=500)) -> dict[str
         return {"error": str(exc)}
 
 
+@app.get("/api/ticker")
+def get_live_ticker_endpoint() -> dict[str, Any]:
+    """Cheap read of the background live-ticker cache (no TD call).
+
+    The plugin_live_ticker worker polls Twelve Data /quote every 3 sec
+    and keeps a single in-memory snapshot. This endpoint just returns
+    that snapshot so the frontend can poll it cheaply (1-2 sec) without
+    burning Twelve Data credits per client refresh.
+    """
+    try:
+        from plugin_live_ticker import get_cached_ticker
+        return {"data": get_cached_ticker()}
+    except Exception as exc:
+        logger.exception("live ticker endpoint failed")
+        return {"error": str(exc)}
+
+
 @app.get("/api/td-indicators/wti")
 def get_td_indicators_wti(interval: str = Query(default="1h")) -> dict[str, Any]:
     """Twelve Data pre-computed RSI/MACD/ATR/ADX/BBANDS for WTI."""
@@ -1394,6 +1411,14 @@ async def startup_event() -> None:
         start_learning_worker()
     except Exception:
         logger.exception("Failed to start learning worker")
+
+    # Launch the live ticker worker: polls Twelve Data /quote every 3 sec
+    # and keeps a single in-memory snapshot the /api/ticker endpoint serves.
+    try:
+        from plugin_live_ticker import start_live_ticker_worker
+        start_live_ticker_worker()
+    except Exception:
+        logger.exception("Failed to start live ticker worker")
 
 
 # ---------------------------------------------------------------------------
