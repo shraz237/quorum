@@ -218,7 +218,7 @@ def get_ohlcv(
     try:
         rows = (
             db.query(OHLCV)
-            .filter(OHLCV.timeframe == timeframe, OHLCV.source == "binance")
+            .filter(OHLCV.timeframe == timeframe, OHLCV.source == "yahoo")
             .order_by(desc(OHLCV.timestamp))
             .limit(limit)
             .all()
@@ -749,7 +749,7 @@ def get_volume_profile(
         rows = (
             session.query(OHLCV)
             .filter(
-                OHLCV.source == "binance",
+                OHLCV.source == "yahoo",
                 OHLCV.timeframe == timeframe,
                 OHLCV.timestamp >= since,
             )

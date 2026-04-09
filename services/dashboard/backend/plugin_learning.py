@@ -63,7 +63,7 @@ def _current_feature_vector() -> dict:
         # Latest price
         ohlc = (
             session.query(OHLCV)
-            .filter(OHLCV.source == "binance", OHLCV.timeframe == "1min")
+            .filter(OHLCV.source == "yahoo", OHLCV.timeframe == "1min")
             .order_by(desc(OHLCV.timestamp))
             .first()
         )
@@ -158,7 +158,7 @@ def _price_at_or_after(session, target_ts: datetime) -> float | None:
     row = (
         session.query(OHLCV)
         .filter(
-            OHLCV.source == "binance",
+            OHLCV.source == "yahoo",
             OHLCV.timeframe == "1min",
             OHLCV.timestamp >= target_ts,
         )

@@ -67,7 +67,7 @@ def _build_state() -> dict[str, Any]:
         with SessionLocal() as session:
             ohlc = (
                 session.query(OHLCV)
-                .filter(OHLCV.source == "binance", OHLCV.timeframe == "1min")
+                .filter(OHLCV.source == "yahoo", OHLCV.timeframe == "1min")
                 .order_by(desc(OHLCV.timestamp))
                 .first()
             )

@@ -37,7 +37,7 @@ def get_current_price() -> float | None:
     with SessionLocal() as session:
         row = (
             session.query(OHLCV)
-            .filter(OHLCV.timeframe == "1min", OHLCV.source == "binance")
+            .filter(OHLCV.timeframe == "1min", OHLCV.source == "yahoo")
             .order_by(OHLCV.timestamp.desc())
             .first()
         )
@@ -56,7 +56,7 @@ def get_current_bar() -> tuple[float, float, float] | None:
     with SessionLocal() as session:
         row = (
             session.query(OHLCV)
-            .filter(OHLCV.timeframe == "1min", OHLCV.source == "binance")
+            .filter(OHLCV.timeframe == "1min", OHLCV.source == "yahoo")
             .order_by(OHLCV.timestamp.desc())
             .first()
         )

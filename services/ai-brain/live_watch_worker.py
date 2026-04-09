@@ -27,7 +27,7 @@ def _latest_price() -> tuple[float | None, datetime | None]:
     with SessionLocal() as session:
         row = (
             session.query(OHLCV)
-            .filter(OHLCV.timeframe == "1min", OHLCV.source == "binance")
+            .filter(OHLCV.timeframe == "1min", OHLCV.source == "yahoo")
             .order_by(desc(OHLCV.timestamp))
             .first()
         )

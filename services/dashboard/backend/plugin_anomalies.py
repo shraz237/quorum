@@ -210,7 +210,7 @@ def _check_price_range_break(session) -> list[dict]:
     """Flag when current close breaks the 7-day range."""
     latest = (
         session.query(OHLCV)
-        .filter(OHLCV.source == "binance", OHLCV.timeframe == "1H")
+        .filter(OHLCV.source == "yahoo", OHLCV.timeframe == "1H")
         .order_by(desc(OHLCV.timestamp))
         .first()
     )
@@ -223,7 +223,7 @@ def _check_price_range_break(session) -> list[dict]:
             func.min(OHLCV.low).label("lo"),
         )
         .filter(
-            OHLCV.source == "binance",
+            OHLCV.source == "yahoo",
             OHLCV.timeframe == "1H",
             OHLCV.timestamp >= since,
             OHLCV.timestamp < latest.timestamp,

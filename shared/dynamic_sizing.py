@@ -82,7 +82,7 @@ def _gather_sizing_state(side: str | None = None) -> dict:
         bars = (
             session.query(OHLCV)
             .filter(
-                OHLCV.source == "binance",
+                OHLCV.source == "yahoo",
                 OHLCV.timeframe == "5min",
                 OHLCV.timestamp >= since,
             )

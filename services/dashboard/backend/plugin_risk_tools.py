@@ -64,7 +64,7 @@ def compute_scenarios(price_offsets: list[float] | None = None) -> dict:
         with SessionLocal() as session:
             row = (
                 session.query(OHLCV)
-                .filter(OHLCV.source == "binance", OHLCV.timeframe == "1min")
+                .filter(OHLCV.source == "yahoo", OHLCV.timeframe == "1min")
                 .order_by(desc(OHLCV.timestamp))
                 .first()
             )
@@ -183,7 +183,7 @@ def _compute_log_returns_sigma(hours: int = 24 * 7) -> float | None:
         bars = (
             session.query(OHLCV)
             .filter(
-                OHLCV.source == "binance",
+                OHLCV.source == "yahoo",
                 OHLCV.timeframe == "1H",
                 OHLCV.timestamp >= since,
             )

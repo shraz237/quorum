@@ -43,6 +43,7 @@ def main() -> None:
         collect_funding_rate as bn_funding,
     )
     from collectors.binance_liquidations_ws import start_liquidations_ws
+    from collectors.yahoo_wti import collect_and_store as yahoo_wti_collect
     from collectors.cross_assets import collect_and_store as cross_assets_collect
     from collectors.shipping import collect_and_store as shipping_collect
     from collectors.portwatch import collect_and_store as portwatch_collect
@@ -87,6 +88,38 @@ def main() -> None:
     # Runs in a daemon background thread, not on the scheduler.
     start_binance_ws()
     start_liquidations_ws()
+
+    # --- Yahoo CL=F (PRIMARY price feed — matches XTB OIL.WTI) ---
+    # NYMEX WTI front-month future, pulled via yfinance. The Binance
+    # CLUSDT perpetual (collected above) drifts 1-3% from real NYMEX
+    # during low-liquidity hours, so we use Yahoo for all scoring /
+    # chart / scalping decisions and keep Binance only for funding,
+    # open interest, liquidations, and other derivatives metrics.
+    scheduler.add_job(
+        safe_run, "interval", minutes=1, args=[yahoo_wti_collect, "1m", "1d"],
+        id="yahoo_wti_1m", name="Yahoo CL=F 1-min",
+        max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        safe_run, "interval", minutes=5, args=[yahoo_wti_collect, "5m", "5d"],
+        id="yahoo_wti_5m", name="Yahoo CL=F 5-min",
+        max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        safe_run, "interval", minutes=15, args=[yahoo_wti_collect, "15m", "5d"],
+        id="yahoo_wti_15m", name="Yahoo CL=F 15-min",
+        max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        safe_run, "interval", hours=1, args=[yahoo_wti_collect, "1h", "5d"],
+        id="yahoo_wti_1h", name="Yahoo CL=F 1-hour",
+        max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        safe_run, "interval", hours=6, args=[yahoo_wti_collect, "1d", "1mo"],
+        id="yahoo_wti_1d", name="Yahoo CL=F 1-day",
+        max_instances=1, coalesce=True,
+    )
 
     # --- Binance derived metrics (OI, funding, long/short, taker flow) ---
     # Fast-cadence metrics: every 5 min.
@@ -166,6 +199,14 @@ def main() -> None:
     logger.info("Warming up Binance metrics (OI, LSR, taker, funding) …")
     safe_run(bn_funding, 500)
     safe_run(bn_metrics_all)
+
+    # Warm up Yahoo CL=F (primary WTI price feed)
+    logger.info("Warming up Yahoo CL=F feed …")
+    safe_run(yahoo_wti_collect, "1m", "1d")
+    safe_run(yahoo_wti_collect, "5m", "5d")
+    safe_run(yahoo_wti_collect, "15m", "5d")
+    safe_run(yahoo_wti_collect, "1h", "5d")
+    safe_run(yahoo_wti_collect, "1d", "1mo")
 
     # Warm up cross-asset collectors (DXY / SPX / Gold / BTC / VIX)
     logger.info("Warming up cross-asset collectors …")
