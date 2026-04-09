@@ -1,10 +1,58 @@
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
 *.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Build artifacts
 dist/
 build/
-.venv/
+*.whl
+
+# Secrets — .env AND every variant
+.env
+.env.*
+!.env.example
+
+# Node / frontend
 node_modules/
-.pytest_cache/
+*.tsbuildinfo
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local data dumps
+*.sqlite
+*.db
+*.dump
+data/
+state/
+dumps/
+
+# Claude Code plan scratchpads (internal-only)
+docs/superpowers/plans/

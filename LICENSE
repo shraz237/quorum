@@ -1,0 +1,46 @@
+MIT License
+
+Copyright (c) 2026 devnerdly
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+=============================================================================
+
+ADDITIONAL NOTICE — TRADING & FINANCIAL DISCLAIMER
+
+This software is an experimental research and educational tool for analyzing
+crude oil market data. It is NOT financial advice, NOT investment guidance,
+and NOT a trading recommendation service.
+
+Trading leveraged derivatives (CFDs, futures, perpetuals) carries substantial
+risk of loss. Losses can exceed your initial deposit. Past performance of any
+strategy, signal, or indicator does not guarantee future results.
+
+THE AUTHORS MAKE NO CLAIMS that this software will be profitable. The authors
+are not financial advisors. The authors accept NO LIABILITY for any financial
+losses arising from the use or misuse of this software, whether run in demo,
+simulation, or live trading mode.
+
+Before running this software against any real exchange account or broker:
+  1. Read every line of code that could place an order.
+  2. Test extensively in a paper/demo environment.
+  3. Understand the -50% account hard stop and position sizing logic.
+  4. Be prepared to lose 100% of any capital at risk.
+
+Use at your own risk.

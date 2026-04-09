@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     postgres_url: str = "postgresql://trading:trading@localhost:5432/trading"
     redis_url: str = "redis://localhost:6379"
 
+    # Dashboard API key — when set, every mutating endpoint and /api/chat
+    # requires the X-API-Key header to match. Leave empty for no-auth local
+    # dev; MUST be set if you ever expose the dashboard outside localhost.
+    dashboard_api_key: str = ""
+
     # Optional - Shipping
     datalastic_api_key: str = ""
     vessel_finder_api_key: str = ""

@@ -105,17 +105,92 @@ def _web_search(query: str, num_results: int = 5) -> dict:
     return {"query": query, "count": len(results), "results": results}
 
 
+def _is_safe_public_url(url: str) -> tuple[bool, str]:
+    """SSRF guard: reject non-http(s), loopback, link-local, private-range,
+    cloud metadata, and reserved IPs. Resolves the host and checks every
+    returned address — not just the first — so split-horizon DNS can't
+    bypass the check.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        return False, f"unparsable url: {exc}"
+    if parsed.scheme not in ("http", "https"):
+        return False, f"disallowed scheme: {parsed.scheme!r}"
+    host = parsed.hostname
+    if not host:
+        return False, "missing host"
+
+    # Reject obvious dangerous hostnames outright
+    _DENY_HOSTS = {
+        "localhost", "localhost.localdomain", "ip6-localhost",
+        "metadata", "metadata.google.internal", "instance-data",
+    }
+    if host.lower() in _DENY_HOSTS:
+        return False, f"blocked hostname: {host}"
+
+    # Resolve all IPs and check every one. socket.getaddrinfo covers v4+v6.
+    try:
+        addrinfo = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        return False, f"dns resolution failed: {exc}"
+
+    for family, _, _, _, sockaddr in addrinfo:
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False, f"unparsable ip: {ip_str}"
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False, f"blocked ip range: {ip}"
+
+    return True, ""
+
+
 def _fetch_url(url: str, max_chars: int = 5000) -> dict:
     import httpx
     from bs4 import BeautifulSoup
 
+    ok, reason = _is_safe_public_url(url)
+    if not ok:
+        logger.warning("fetch_url blocked %r: %s", url, reason)
+        return {"error": f"blocked by SSRF guard: {reason}"}
+
     try:
+        # follow_redirects=False so a 302 can't bounce us into a blocked range.
         response = httpx.get(
             url,
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=20,
-            follow_redirects=True,
+            follow_redirects=False,
         )
+        # Manually follow up to 3 redirects, re-validating each hop.
+        hops = 0
+        while response.is_redirect and hops < 3:
+            next_url = response.headers.get("location")
+            if not next_url:
+                break
+            ok, reason = _is_safe_public_url(next_url)
+            if not ok:
+                return {"error": f"redirect blocked: {reason}"}
+            response = httpx.get(
+                next_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=20,
+                follow_redirects=False,
+            )
+            hops += 1
         response.raise_for_status()
     except Exception as exc:
         logger.warning("fetch_url failed for %r: %s", url, exc)

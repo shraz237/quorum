@@ -12,7 +12,7 @@ from typing import Any
 
 import redis as redis_sync
 import docker as docker_sdk
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -41,6 +41,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Trading Dashboard API", version="1.0.0")
+
+
+# ---------------------------------------------------------------------------
+# API key gate — protects mutating endpoints, log streams, and /api/chat.
+# Opt-in: if DASHBOARD_API_KEY is empty (default), auth is a no-op for
+# convenient local development. Set it in .env the moment you expose the
+# dashboard beyond localhost.
+# ---------------------------------------------------------------------------
+
+from fastapi import Header, HTTPException
+
+
+def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    expected = settings.dashboard_api_key or ""
+    if not expected:
+        return  # no-auth mode
+    if x_api_key != expected:
+        raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
 
 app.add_middleware(
     CORSMiddleware,
@@ -350,7 +368,7 @@ def list_smart_alerts_endpoint(status: str | None = Query(default=None)) -> dict
         return {"error": str(exc)}
 
 
-@app.post("/api/smart-alerts")
+@app.post("/api/smart-alerts", dependencies=[Depends(require_api_key)])
 def create_smart_alert_endpoint(payload: _SmartAlertIn) -> dict[str, Any]:
     try:
         from plugin_smart_alerts import create_smart_alert
@@ -364,7 +382,7 @@ def create_smart_alert_endpoint(payload: _SmartAlertIn) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
-@app.delete("/api/smart-alerts/{alert_id}")
+@app.delete("/api/smart-alerts/{alert_id}", dependencies=[Depends(require_api_key)])
 def delete_smart_alert_endpoint(alert_id: int) -> dict[str, Any]:
     try:
         from plugin_smart_alerts import delete_smart_alert
@@ -374,7 +392,7 @@ def delete_smart_alert_endpoint(alert_id: int) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
-@app.post("/api/smart-alerts/evaluate")
+@app.post("/api/smart-alerts/evaluate", dependencies=[Depends(require_api_key)])
 def evaluate_smart_alerts_endpoint() -> dict[str, Any]:
     """Manual trigger — evaluate all smart alerts right now."""
     try:
@@ -856,7 +874,7 @@ def get_campaign_detail_endpoint(campaign_id: int) -> dict[str, Any]:
     return {"data": state}
 
 
-@app.post("/api/campaigns/{campaign_id}/close")
+@app.post("/api/campaigns/{campaign_id}/close", dependencies=[Depends(require_api_key)])
 def close_campaign_endpoint(campaign_id: int) -> dict[str, Any]:
     """Manually close a campaign at the current market price."""
     snap = close_campaign(campaign_id, status="closed_manual", notes="Closed via dashboard")
@@ -886,7 +904,7 @@ def close_campaign_endpoint(campaign_id: int) -> dict[str, Any]:
     return {"data": snap}
 
 
-@app.post("/api/campaigns/{campaign_id}/dca")
+@app.post("/api/campaigns/{campaign_id}/dca", dependencies=[Depends(require_api_key)])
 def add_dca_layer_endpoint(campaign_id: int) -> dict[str, Any]:
     """Manually add the next DCA layer to a campaign."""
     price = get_current_price()
@@ -916,7 +934,7 @@ def add_dca_layer_endpoint(campaign_id: int) -> dict[str, Any]:
     return {"data": state}
 
 
-@app.post("/api/positions/{position_id}/close")
+@app.post("/api/positions/{position_id}/close", dependencies=[Depends(require_api_key)])
 def close_position_endpoint(position_id: int) -> dict[str, Any]:
     """Manually close an open position at the current market price."""
     from shared.position_manager import close_position, get_current_price
@@ -957,7 +975,7 @@ def _parse_key_events(raw: str | None) -> list:
         return []
 
 
-@app.post("/api/chat")
+@app.post("/api/chat", dependencies=[Depends(require_api_key)])
 def chat_endpoint(req: ChatRequest):
     """Stream a chat response via Server-Sent Events."""
     return StreamingResponse(
@@ -1183,7 +1201,7 @@ def _find_trading_containers(client: docker_sdk.DockerClient) -> list:
     return containers
 
 
-@app.get("/api/logs")
+@app.get("/api/logs", dependencies=[Depends(require_api_key)])
 def get_logs(
     service: str | None = Query(default=None),
     lines: int = Query(default=200, ge=1, le=2000),
@@ -1316,7 +1334,7 @@ async def websocket_logs(ws: WebSocket) -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    logger.info("Dashboard backend starting — DB URL: %s", settings.postgres_url)
+    logger.info("Dashboard backend starting — DB URL: %s", settings.postgres_url.split("@")[-1] if "@" in settings.postgres_url else "(local)")
     # Launch the learning worker: every 5 min capture a signal snapshot and
     # backfill any forward returns whose horizon has elapsed.
     try:
