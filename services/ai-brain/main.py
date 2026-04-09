@@ -579,6 +579,11 @@ def main() -> None:
     threading.Thread(target=_live_watch_loop, daemon=True, name="live-watch").start()
     logger.info("Live Watch worker thread started")
 
+    # Start the Opus heartbeat worker — reviews open campaigns every 15 min
+    from heartbeat import run_worker_loop as _heartbeat_loop
+    threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
+    logger.info("Heartbeat worker thread started")
+
     for msg_id, data in subscribe(STREAM_IN, group=GROUP, consumer=CONSUMER, block=10_000):
         logger.info("Received scores event %s", msg_id)
         try:

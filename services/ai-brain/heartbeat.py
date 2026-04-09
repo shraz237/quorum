@@ -1,0 +1,779 @@
+"""Heartbeat Opus position manager.
+
+Every HEARTBEAT_INTERVAL_MINUTES (default 15), ask Claude Opus 4.6 to
+review every open campaign and decide hold / close / update_levels.
+Opus has full execution authority — the worker executes its decisions
+immediately, logs everything to heartbeat_runs, and fires a Telegram
+alert on any action.
+
+Kill-switch: Redis key `heartbeat:enabled` (default "true"). The dashboard
+has a pause/resume button that flips this. Env var HEARTBEAT_ENABLED=false
+forces off regardless of Redis.
+
+Guardrails (enforced on this side, never trusted to Opus):
+  - Max 1 close per campaign per 30 min (close cooldown)
+  - Refuse close when |unrealized_pnl_pct| < 0.5%  (indecision guard)
+  - Immutable -50% hard-stop still runs independently on every score event
+  - Malformed tool calls are logged as decision='error'
+  - Redis lock `heartbeat:running` (60s TTL) prevents overlapping ticks
+
+The -50% hard-stop in shared/position_manager.check_tp_sl_hits() remains
+the last-resort safety net — it runs on every score event and does NOT
+depend on the heartbeat loop working.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+from anthropic import Anthropic
+
+from shared.config import settings
+from shared.models.base import SessionLocal
+from shared.models.campaigns import Campaign
+from shared.models.heartbeat_runs import HeartbeatRun
+from shared.models.ohlcv import OHLCV
+from shared.models.signals import AnalysisScore
+from shared.models.knowledge import KnowledgeSummary
+from shared.account_manager import recompute_account_state
+from shared.position_manager import (
+    close_campaign,
+    compute_campaign_state,
+    get_current_price,
+    update_campaign_levels,
+)
+from shared.redis_streams import get_redis, publish
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+MODEL = "claude-opus-4-6"
+HEARTBEAT_INTERVAL_MINUTES = int(os.environ.get("HEARTBEAT_INTERVAL_MINUTES", "15"))
+HEARTBEAT_INTERVAL_SECONDS = HEARTBEAT_INTERVAL_MINUTES * 60
+
+# Kill-switch defaults
+REDIS_KEY_ENABLED = "heartbeat:enabled"
+REDIS_KEY_LOCK = "heartbeat:running"
+REDIS_KEY_LAST_RUN = "heartbeat:last_run_at"
+REDIS_KEY_NEXT_RUN = "heartbeat:next_run_at"
+LOCK_TTL_SECONDS = 120  # longer than a single Opus call (~30-60s)
+
+# Guardrails
+CLOSE_COOLDOWN_MINUTES = 30
+INDECISION_PCT_THRESHOLD = 0.5  # refuse close when |pnl_pct| < this
+
+# Redis stream for Telegram alerts (matches main.py STREAM_POSITION)
+STREAM_POSITION = "position.event"
+
+
+# ---------------------------------------------------------------------------
+# Opus tool schema — one of these must be returned per open campaign
+# ---------------------------------------------------------------------------
+
+MANAGE_CAMPAIGNS_TOOL = {
+    "name": "manage_campaigns",
+    "description": (
+        "Return management decisions for every open campaign. You MUST include "
+        "exactly one decision per open campaign — do not forget any. Be "
+        "conservative with 'close': only close when the thesis is clearly broken. "
+        "Prefer 'update_levels' (tighten SL) over premature 'close'. Use 'hold' "
+        "when the thesis still applies and levels do not need adjustment."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "description": "One decision per open campaign.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "campaign_id": {
+                            "type": "integer",
+                            "description": "The campaign id this decision applies to.",
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["hold", "close", "update_levels"],
+                            "description": (
+                                "hold = no action, just log reasoning. "
+                                "close = market-close all layers. "
+                                "update_levels = adjust TP and/or SL in place."
+                            ),
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Short rationale citing specific evidence "
+                                "(score value, news headline, price level). "
+                                "1-2 sentences."
+                            ),
+                        },
+                        "new_take_profit": {
+                            "type": ["number", "null"],
+                            "description": (
+                                "Only set when action=update_levels. "
+                                "New TP price. Must be above current price for "
+                                "LONG, below for SHORT. Pass null to leave unchanged."
+                            ),
+                        },
+                        "new_stop_loss": {
+                            "type": ["number", "null"],
+                            "description": (
+                                "Only set when action=update_levels. "
+                                "New SL price. Must be below current price for "
+                                "LONG, above for SHORT. Pass null to leave unchanged."
+                            ),
+                        },
+                    },
+                    "required": ["campaign_id", "action", "reason"],
+                },
+            },
+            "overall_rationale": {
+                "type": "string",
+                "description": "One paragraph summarising the market read for this tick.",
+            },
+        },
+        "required": ["decisions", "overall_rationale"],
+    },
+}
+
+
+SYSTEM_PROMPT = """You are the LIVE POSITION MANAGER for a WTI crude oil trading bot.
+
+Every 15 minutes you review every open campaign and decide what to do.
+Your decisions are EXECUTED IMMEDIATELY — there is no human approval step.
+You have full authority to close campaigns or adjust their take-profit /
+stop-loss levels. Be deliberate.
+
+Your toolbox per campaign:
+
+  • hold            — do nothing, just log your reasoning
+  • close           — market-close all DCA layers in this campaign
+  • update_levels   — change take_profit and/or stop_loss in place
+
+You must return EXACTLY ONE decision per open campaign in the `decisions`
+array. Do not forget any campaign. Do not return two decisions for the
+same campaign.
+
+RULES:
+
+1. CONSERVATIVE CLOSE BIAS. Only close when the original thesis is clearly
+   broken — e.g. a news catalyst the position was riding just reversed, or
+   a key level broke with conviction. If you're uncertain, prefer
+   `update_levels` (tighten SL to lock in gains or limit further loss)
+   over `close`.
+
+2. PREFER UPDATE_LEVELS OVER CLOSE. Moving SL to break-even or just above
+   entry is often the right move — it locks in profit without giving up
+   upside. This is your trailing-stop tool.
+
+3. RESPECT THE ENTRY THESIS. Each campaign has an `entry_snapshot` with
+   the original reasoning. Do not close just because a single indicator
+   flipped — you need a meaningful change from the original setup.
+
+4. CITE EVIDENCE. Every reason must reference specific data: a score
+   value, a news headline from recent_news, a price level, the P/L %.
+   Vague rationales are useless for audit.
+
+5. INDECISION. If a campaign's unrealized P/L is within ±0.5% of
+   break-even, prefer `hold` — the market hasn't told you anything yet.
+
+6. LEVEL VALIDATION. When action=update_levels, your new levels MUST be
+   on the correct side of the CURRENT price:
+     - LONG:  TP > current_price, SL < current_price
+     - SHORT: TP < current_price, SL > current_price
+   Invalid levels are rejected by the system and logged as errors.
+
+7. LAST HEARTBEAT CONTEXT. Each campaign shows last_heartbeat_decision.
+   Don't flip-flop between ticks without new evidence — if you held last
+   tick, holding again is fine; but if you're changing your mind, cite
+   what changed.
+
+Use the manage_campaigns tool to return your decisions.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Redis kill-switch helpers
+# ---------------------------------------------------------------------------
+
+def _redis_str(val) -> str | None:
+    """Coerce a Redis GET result (bytes or str) to a plain string."""
+    if val is None:
+        return None
+    if isinstance(val, bytes):
+        return val.decode("utf-8")
+    return str(val)
+
+
+def is_enabled() -> bool:
+    """Return True unless the kill-switch is explicitly off.
+
+    Precedence: HEARTBEAT_ENABLED env var (if set to 'false'/'0') > Redis flag.
+    """
+    env_override = os.environ.get("HEARTBEAT_ENABLED", "").lower()
+    if env_override in ("false", "0", "no", "off"):
+        return False
+
+    try:
+        r = get_redis()
+        val = _redis_str(r.get(REDIS_KEY_ENABLED))
+        if val is None:
+            # Default to ENABLED on first run
+            r.set(REDIS_KEY_ENABLED, "true")
+            return True
+        return val.lower() == "true"
+    except Exception:
+        logger.exception("Failed to read heartbeat:enabled, defaulting to True")
+        return True
+
+
+def set_enabled(enabled: bool) -> None:
+    try:
+        get_redis().set(REDIS_KEY_ENABLED, "true" if enabled else "false")
+    except Exception:
+        logger.exception("Failed to set heartbeat:enabled")
+
+
+def _acquire_lock() -> bool:
+    """Try to acquire the heartbeat lock. Returns False if another tick is running."""
+    try:
+        r = get_redis()
+        # SET NX EX — atomic acquire-or-fail
+        acquired = r.set(REDIS_KEY_LOCK, "1", nx=True, ex=LOCK_TTL_SECONDS)
+        return bool(acquired)
+    except Exception:
+        logger.exception("Failed to acquire heartbeat lock")
+        return False
+
+
+def _release_lock() -> None:
+    try:
+        get_redis().delete(REDIS_KEY_LOCK)
+    except Exception:
+        logger.exception("Failed to release heartbeat lock")
+
+
+def _set_timestamps(last_run: datetime, next_run: datetime) -> None:
+    try:
+        r = get_redis()
+        r.set(REDIS_KEY_LAST_RUN, last_run.isoformat())
+        r.set(REDIS_KEY_NEXT_RUN, next_run.isoformat())
+    except Exception:
+        logger.exception("Failed to write heartbeat timestamps")
+
+
+# ---------------------------------------------------------------------------
+# Context assembly — everything Opus needs to decide
+# ---------------------------------------------------------------------------
+
+def _get_open_campaign_ids() -> list[int]:
+    with SessionLocal() as session:
+        rows = (
+            session.query(Campaign.id)
+            .filter(Campaign.status == "open")
+            .order_by(Campaign.id)
+            .all()
+        )
+        return [r[0] for r in rows]
+
+
+def _get_last_heartbeat_for_campaign(campaign_id: int) -> dict | None:
+    with SessionLocal() as session:
+        row = (
+            session.query(HeartbeatRun)
+            .filter(HeartbeatRun.campaign_id == campaign_id)
+            .order_by(HeartbeatRun.ran_at.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return {
+            "decision": row.decision,
+            "reason": row.reason,
+            "ran_at": row.ran_at.isoformat(),
+            "executed": row.executed,
+        }
+
+
+def _get_latest_scores() -> dict | None:
+    with SessionLocal() as session:
+        row = (
+            session.query(AnalysisScore)
+            .order_by(AnalysisScore.timestamp.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return {
+            "timestamp": row.timestamp.isoformat(),
+            "unified_score": row.unified_score,
+            "technical_score": row.technical_score,
+            "fundamental_score": row.fundamental_score,
+            "sentiment_score": row.sentiment_score,
+            "shipping_score": row.shipping_score,
+        }
+
+
+def _get_recent_news(minutes: int = 30) -> list[dict]:
+    since = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
+    with SessionLocal() as session:
+        rows = (
+            session.query(KnowledgeSummary)
+            .filter(KnowledgeSummary.timestamp >= since)
+            .order_by(KnowledgeSummary.timestamp.desc())
+            .limit(5)
+            .all()
+        )
+        return [
+            {
+                "ts": r.timestamp.isoformat(),
+                "summary": (r.summary or "")[:400],
+                "sentiment": r.sentiment_label,
+            }
+            for r in rows
+        ]
+
+
+def _get_account_snapshot() -> dict | None:
+    try:
+        state = recompute_account_state()
+        return {
+            "equity": state.get("equity"),
+            "cash": state.get("cash"),
+            "free_margin": state.get("free_margin"),
+            "margin_used": state.get("margin_used"),
+            "account_drawdown_pct": state.get("account_drawdown_pct"),
+        }
+    except Exception:
+        logger.exception("Failed to recompute account state for heartbeat")
+        return None
+
+
+def _build_campaign_snapshot(campaign_id: int, current_price: float | None) -> dict | None:
+    """Build the per-campaign payload for Opus."""
+    state = compute_campaign_state(campaign_id, current_price)
+    if state is None:
+        return None
+
+    # Need entry_snapshot — compute_campaign_state doesn't include it
+    with SessionLocal() as session:
+        camp = session.query(Campaign).filter(Campaign.id == campaign_id).first()
+        entry_snapshot = camp.entry_snapshot if camp is not None else None
+        opened_at_dt = camp.opened_at if camp is not None else None
+
+    age_hours = None
+    if opened_at_dt is not None:
+        age_hours = round(
+            (datetime.now(tz=timezone.utc) - opened_at_dt).total_seconds() / 3600.0, 2
+        )
+
+    return {
+        "id": campaign_id,
+        "side": state.get("side"),
+        "avg_entry": state.get("avg_entry_price"),
+        "layers": state.get("layers_used"),
+        "max_layers": state.get("max_layers"),
+        "total_lots": state.get("total_lots"),
+        "total_margin": state.get("total_margin"),
+        "unrealized_pnl_usd": state.get("unrealised_pnl"),
+        "unrealized_pnl_pct": state.get("unrealised_pnl_pct"),
+        "take_profit": state.get("take_profit"),
+        "stop_loss": state.get("stop_loss"),
+        "size_multiplier": state.get("size_multiplier"),
+        "opened_at": state.get("opened_at"),
+        "age_hours": age_hours,
+        "entry_thesis": (
+            entry_snapshot.get("reason") if isinstance(entry_snapshot, dict) else None
+        ),
+        "entry_snapshot": entry_snapshot if isinstance(entry_snapshot, dict) else None,
+        "last_heartbeat_decision": _get_last_heartbeat_for_campaign(campaign_id),
+    }
+
+
+def _build_context(open_campaign_ids: list[int]) -> dict:
+    current_price = get_current_price()
+    campaigns = [
+        _build_campaign_snapshot(cid, current_price)
+        for cid in open_campaign_ids
+    ]
+    campaigns = [c for c in campaigns if c is not None]
+
+    return {
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "heartbeat_interval_minutes": HEARTBEAT_INTERVAL_MINUTES,
+        "current_price": current_price,
+        "account": _get_account_snapshot(),
+        "latest_scores": _get_latest_scores(),
+        "recent_news": _get_recent_news(30),
+        "open_campaigns": campaigns,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Opus call
+# ---------------------------------------------------------------------------
+
+def _call_opus(context: dict) -> dict | None:
+    """Ask Opus to manage the open campaigns. Returns parsed tool-use input or None."""
+    client = Anthropic(api_key=settings.anthropic_api_key)
+
+    user_prompt = (
+        "Review the open campaigns and return your management decisions.\n\n"
+        "## Context\n"
+        f"{json.dumps(context, indent=2, default=str)}\n\n"
+        "Return EXACTLY one decision per open campaign using the "
+        "manage_campaigns tool."
+    )
+
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=2000,
+            system=SYSTEM_PROMPT,
+            tools=[MANAGE_CAMPAIGNS_TOOL],
+            tool_choice={"type": "tool", "name": "manage_campaigns"},
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "manage_campaigns":
+                return block.input
+    except Exception:
+        logger.exception("Heartbeat Opus call failed")
+        return None
+
+    logger.error("Heartbeat Opus did not return a manage_campaigns tool_use block")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Guardrails + execution
+# ---------------------------------------------------------------------------
+
+def _has_recent_close(campaign_id: int) -> bool:
+    """True if this campaign had an executed close decision in the last 30 min."""
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=CLOSE_COOLDOWN_MINUTES)
+    with SessionLocal() as session:
+        row = (
+            session.query(HeartbeatRun)
+            .filter(
+                HeartbeatRun.campaign_id == campaign_id,
+                HeartbeatRun.decision == "close",
+                HeartbeatRun.executed == True,  # noqa: E712
+                HeartbeatRun.ran_at >= cutoff,
+            )
+            .first()
+        )
+        return row is not None
+
+
+def _record_run(
+    ran_at: datetime,
+    campaign_id: int | None,
+    decision: str,
+    reason: str | None,
+    opus_raw: dict | None,
+    executed: bool,
+    duration_seconds: float | None,
+) -> None:
+    try:
+        with SessionLocal() as session:
+            row = HeartbeatRun(
+                ran_at=ran_at,
+                campaign_id=campaign_id,
+                decision=decision,
+                reason=(reason or "")[:2000],
+                opus_raw=opus_raw,
+                executed=executed,
+                duration_seconds=duration_seconds,
+            )
+            session.add(row)
+            session.commit()
+    except Exception:
+        logger.exception("Failed to persist HeartbeatRun")
+
+
+def _publish_heartbeat_action(
+    campaign_id: int,
+    action: str,
+    reason: str,
+    extra: dict | None = None,
+) -> None:
+    payload = {
+        "type": "heartbeat_action",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "campaign_id": campaign_id,
+        "action": action,
+        "reason": reason,
+    }
+    if extra:
+        payload.update(extra)
+    try:
+        publish(STREAM_POSITION, payload)
+        logger.info("Published heartbeat_action for campaign #%s: %s", campaign_id, action)
+    except Exception:
+        logger.exception("Failed to publish heartbeat_action event")
+
+
+def _execute_decision(
+    decision: dict,
+    context_campaigns: list[dict],
+    ran_at: datetime,
+    opus_raw: dict,
+) -> None:
+    """Execute one per-campaign decision from Opus, logging and alerting."""
+    campaign_id = decision.get("campaign_id")
+    action = decision.get("action")
+    reason = decision.get("reason") or ""
+
+    if not isinstance(campaign_id, int) or action not in ("hold", "close", "update_levels"):
+        logger.error("Malformed heartbeat decision: %r", decision)
+        _record_run(ran_at, campaign_id, "error", f"malformed: {decision!r}", opus_raw, False, None)
+        return
+
+    # Find the campaign in our context — Opus shouldn't invent ids
+    camp_ctx = next((c for c in context_campaigns if c.get("id") == campaign_id), None)
+    if camp_ctx is None:
+        logger.warning(
+            "Heartbeat: Opus returned decision for unknown campaign #%s — ignoring",
+            campaign_id,
+        )
+        _record_run(
+            ran_at, campaign_id, "error",
+            "opus returned unknown campaign_id", opus_raw, False, None,
+        )
+        return
+
+    pnl_pct = camp_ctx.get("unrealized_pnl_pct") or 0.0
+
+    # --- HOLD: just log, no action ---
+    if action == "hold":
+        logger.info("Heartbeat hold #%s: %s", campaign_id, reason[:120])
+        _record_run(ran_at, campaign_id, "hold", reason, opus_raw, True, None)
+        return
+
+    # --- CLOSE: guardrails then execute ---
+    if action == "close":
+        # Indecision guard
+        if abs(pnl_pct) < INDECISION_PCT_THRESHOLD:
+            logger.info(
+                "Heartbeat close BLOCKED for #%s (indecision guard, pnl %.2f%%): %s",
+                campaign_id, pnl_pct, reason[:120],
+            )
+            _record_run(
+                ran_at, campaign_id, "close",
+                f"BLOCKED (indecision {pnl_pct:.2f}%): {reason}",
+                opus_raw, False, None,
+            )
+            return
+
+        # Cooldown guard
+        if _has_recent_close(campaign_id):
+            logger.info(
+                "Heartbeat close BLOCKED for #%s (cooldown): %s",
+                campaign_id, reason[:120],
+            )
+            _record_run(
+                ran_at, campaign_id, "close",
+                f"BLOCKED (cooldown): {reason}", opus_raw, False, None,
+            )
+            return
+
+        # Execute close
+        try:
+            snap = close_campaign(campaign_id, status="closed_strategy", notes=f"heartbeat: {reason}")
+        except Exception:
+            logger.exception("Heartbeat close_campaign(#%s) raised", campaign_id)
+            _record_run(
+                ran_at, campaign_id, "close",
+                f"EXECUTION FAILED: {reason}", opus_raw, False, None,
+            )
+            return
+
+        if snap is None:
+            _record_run(
+                ran_at, campaign_id, "close",
+                f"close_campaign returned None: {reason}", opus_raw, False, None,
+            )
+            return
+
+        logger.warning(
+            "Heartbeat CLOSED campaign #%s: %s (pnl %.2f%%)",
+            campaign_id, reason[:120], pnl_pct,
+        )
+        _record_run(ran_at, campaign_id, "close", reason, opus_raw, True, None)
+        _publish_heartbeat_action(
+            campaign_id,
+            "close",
+            reason,
+            extra={
+                "side": camp_ctx.get("side"),
+                "realized_pnl": snap.get("realized_pnl") or snap.get("realised_pnl"),
+                "pnl_pct_at_close": pnl_pct,
+            },
+        )
+        return
+
+    # --- UPDATE_LEVELS: validate + execute ---
+    if action == "update_levels":
+        new_tp = decision.get("new_take_profit")
+        new_sl = decision.get("new_stop_loss")
+        if new_tp is None and new_sl is None:
+            logger.warning(
+                "Heartbeat update_levels #%s with no new levels — treating as hold",
+                campaign_id,
+            )
+            _record_run(
+                ran_at, campaign_id, "hold",
+                f"update_levels with no new levels: {reason}",
+                opus_raw, True, None,
+            )
+            return
+
+        try:
+            result = update_campaign_levels(campaign_id, take_profit=new_tp, stop_loss=new_sl)
+        except Exception:
+            logger.exception("Heartbeat update_campaign_levels(#%s) raised", campaign_id)
+            _record_run(
+                ran_at, campaign_id, "update_levels",
+                f"EXECUTION FAILED: {reason}", opus_raw, False, None,
+            )
+            return
+
+        if result is None:
+            logger.warning(
+                "Heartbeat update_levels REJECTED for #%s (validation): tp=%s sl=%s",
+                campaign_id, new_tp, new_sl,
+            )
+            _record_run(
+                ran_at, campaign_id, "update_levels",
+                f"REJECTED (validation) tp={new_tp} sl={new_sl}: {reason}",
+                opus_raw, False, None,
+            )
+            return
+
+        logger.info(
+            "Heartbeat UPDATED levels #%s: TP %s->%s, SL %s->%s (%s)",
+            campaign_id,
+            result["old_take_profit"], result["new_take_profit"],
+            result["old_stop_loss"], result["new_stop_loss"],
+            reason[:80],
+        )
+        _record_run(ran_at, campaign_id, "update_levels", reason, opus_raw, True, None)
+        _publish_heartbeat_action(
+            campaign_id,
+            "update_levels",
+            reason,
+            extra={
+                "side": camp_ctx.get("side"),
+                "old_take_profit": result["old_take_profit"],
+                "new_take_profit": result["new_take_profit"],
+                "old_stop_loss": result["old_stop_loss"],
+                "new_stop_loss": result["new_stop_loss"],
+            },
+        )
+        return
+
+
+# ---------------------------------------------------------------------------
+# One full heartbeat tick
+# ---------------------------------------------------------------------------
+
+def run_tick() -> dict:
+    """Run one heartbeat tick. Safe to call manually for smoke tests.
+
+    Returns a summary dict describing what happened.
+    """
+    ran_at = datetime.now(tz=timezone.utc)
+    tick_start = time.time()
+
+    if not is_enabled():
+        logger.info("Heartbeat: kill-switch OFF, skipping tick")
+        return {"status": "disabled", "ran_at": ran_at.isoformat()}
+
+    open_ids = _get_open_campaign_ids()
+    if not open_ids:
+        logger.info("Heartbeat: no open campaigns, skipping tick")
+        return {"status": "flat", "ran_at": ran_at.isoformat()}
+
+    if not _acquire_lock():
+        logger.info("Heartbeat: another tick is running, skipping")
+        return {"status": "locked", "ran_at": ran_at.isoformat()}
+
+    try:
+        context = _build_context(open_ids)
+        if not context.get("open_campaigns"):
+            logger.info("Heartbeat: context has no open campaigns after build, skipping")
+            return {"status": "flat_after_build", "ran_at": ran_at.isoformat()}
+
+        opus_out = _call_opus(context)
+        duration = time.time() - tick_start
+
+        if opus_out is None:
+            _record_run(ran_at, None, "error", "opus_call_failed", None, False, duration)
+            return {"status": "opus_error", "ran_at": ran_at.isoformat()}
+
+        decisions = opus_out.get("decisions") or []
+        if not isinstance(decisions, list) or not decisions:
+            _record_run(ran_at, None, "error", "empty_decisions", opus_out, False, duration)
+            return {"status": "empty_decisions", "ran_at": ran_at.isoformat()}
+
+        # Execute each decision
+        for dec in decisions:
+            _execute_decision(dec, context["open_campaigns"], ran_at, opus_out)
+
+        # Write a tick-summary row with the overall rationale + duration
+        _record_run(
+            ran_at, None, "skipped",
+            (opus_out.get("overall_rationale") or "")[:1000],
+            opus_out, True, duration,
+        )
+
+        return {
+            "status": "ok",
+            "ran_at": ran_at.isoformat(),
+            "duration_seconds": round(duration, 2),
+            "decisions": len(decisions),
+            "campaigns": len(open_ids),
+        }
+    finally:
+        _release_lock()
+
+
+# ---------------------------------------------------------------------------
+# Background worker loop
+# ---------------------------------------------------------------------------
+
+def run_worker_loop() -> None:
+    """Long-running loop — call run_tick() every HEARTBEAT_INTERVAL_SECONDS.
+
+    Designed to be started in a daemon thread from ai-brain/main.py.
+    """
+    logger.info(
+        "Heartbeat worker starting (interval=%d min, env_override=%s)",
+        HEARTBEAT_INTERVAL_MINUTES,
+        os.environ.get("HEARTBEAT_ENABLED", "<unset>"),
+    )
+
+    # Initial delay — let the service finish booting + other workers start
+    time.sleep(30)
+
+    while True:
+        try:
+            next_run = datetime.now(tz=timezone.utc) + timedelta(seconds=HEARTBEAT_INTERVAL_SECONDS)
+            _set_timestamps(datetime.now(tz=timezone.utc), next_run)
+            result = run_tick()
+            logger.info("Heartbeat tick result: %s", result)
+        except Exception:
+            logger.exception("Heartbeat tick crashed unexpectedly")
+
+        time.sleep(HEARTBEAT_INTERVAL_SECONDS)

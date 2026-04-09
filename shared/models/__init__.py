@@ -19,6 +19,7 @@ from shared.models.binance_metrics import (
 )
 from shared.models.anomalies import Anomaly
 from shared.models.signal_snapshots import SignalSnapshot
+from shared.models.heartbeat_runs import HeartbeatRun
 
 __all__ = [
     "Base",
@@ -49,4 +50,5 @@ __all__ = [
     "BinanceLiquidation",
     "Anomaly",
     "SignalSnapshot",
+    "HeartbeatRun",
 ]

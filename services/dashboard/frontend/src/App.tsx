@@ -17,6 +17,7 @@ import RiskToolsPanel from "./components/RiskToolsPanel";
 import CrossContextPanel from "./components/CrossContextPanel";
 import LearningPanel from "./components/LearningPanel";
 import LivePriceTicker from "./components/LivePriceTicker";
+import HeartbeatPill from "./components/HeartbeatPill";
 import ScalpingRangePanel from "./components/ScalpingRangePanel";
 import TwelveSensorPanel from "./components/TwelveSensorPanel";
 
@@ -181,8 +182,9 @@ const App: React.FC = () => {
           <LivePriceTicker />
         </div>
 
-        {/* WebSocket status pill — right side */}
-        <div className="flex justify-end">
+        {/* Heartbeat pill + WebSocket status pill — right side */}
+        <div className="flex justify-end items-center gap-2">
+          <HeartbeatPill />
           <span
             className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
               wsConnected

@@ -434,6 +434,111 @@ def _validate_tp_sl(
     return tp, sl
 
 
+def update_campaign_levels(
+    campaign_id: int,
+    take_profit: float | None = None,
+    stop_loss: float | None = None,
+) -> dict | None:
+    """Update an open campaign's take_profit and/or stop_loss in place.
+
+    Used by the heartbeat Opus manager to tighten SL as profits build,
+    or to pull TP closer when the thesis is losing steam. Validates the
+    new levels against the CURRENT price (not the original entry) since
+    the campaign is already in flight.
+
+    Rules:
+      - Campaign must be open.
+      - For LONG: TP must be > current_price, SL must be < current_price.
+      - For SHORT: TP must be < current_price, SL must be > current_price.
+      - At least one of take_profit / stop_loss must be provided.
+      - None means "leave unchanged" — passing explicit None for both is a no-op.
+      - Invalid levels are REJECTED (return None) rather than silently dropped.
+        The caller (heartbeat) needs to know the update failed so it can log
+        the Opus hallucination.
+
+    Returns a dict with the updated levels on success, None on validation failure
+    or if the campaign doesn't exist / is already closed.
+    """
+    if take_profit is None and stop_loss is None:
+        logger.warning("update_campaign_levels: both TP and SL are None, nothing to do")
+        return None
+
+    current_price = get_current_price()
+    if current_price is None:
+        logger.error("update_campaign_levels: no current price available")
+        return None
+
+    with SessionLocal() as session:
+        campaign = session.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if campaign is None:
+            logger.warning("update_campaign_levels: campaign #%s not found", campaign_id)
+            return None
+        if campaign.status != "open":
+            logger.warning(
+                "update_campaign_levels: campaign #%s is %s, cannot update",
+                campaign_id, campaign.status,
+            )
+            return None
+
+        side = campaign.side
+
+        # Validate new levels against CURRENT price
+        if take_profit is not None:
+            if side == "LONG" and take_profit <= current_price:
+                logger.warning(
+                    "update_campaign_levels: rejecting LONG TP %.3f <= current %.3f",
+                    take_profit, current_price,
+                )
+                return None
+            if side == "SHORT" and take_profit >= current_price:
+                logger.warning(
+                    "update_campaign_levels: rejecting SHORT TP %.3f >= current %.3f",
+                    take_profit, current_price,
+                )
+                return None
+
+        if stop_loss is not None:
+            if side == "LONG" and stop_loss >= current_price:
+                logger.warning(
+                    "update_campaign_levels: rejecting LONG SL %.3f >= current %.3f",
+                    stop_loss, current_price,
+                )
+                return None
+            if side == "SHORT" and stop_loss <= current_price:
+                logger.warning(
+                    "update_campaign_levels: rejecting SHORT SL %.3f <= current %.3f",
+                    stop_loss, current_price,
+                )
+                return None
+
+        old_tp = campaign.take_profit
+        old_sl = campaign.stop_loss
+        if take_profit is not None:
+            campaign.take_profit = take_profit
+        if stop_loss is not None:
+            campaign.stop_loss = stop_loss
+        session.commit()
+
+        result = {
+            "campaign_id": campaign_id,
+            "side": side,
+            "current_price": current_price,
+            "old_take_profit": old_tp,
+            "new_take_profit": campaign.take_profit,
+            "old_stop_loss": old_sl,
+            "new_stop_loss": campaign.stop_loss,
+        }
+
+    logger.info(
+        "Updated campaign #%s levels: TP %s -> %s, SL %s -> %s (price %.3f)",
+        campaign_id,
+        old_tp, result["new_take_profit"],
+        old_sl, result["new_stop_loss"],
+        current_price,
+    )
+    return result
+
+
 def open_new_campaign(
     side: str,
     current_price: float,

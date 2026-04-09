@@ -920,6 +920,43 @@ def get_liquidations(
     }
 
 
+# ---------------------------------------------------------------------------
+# Heartbeat (Opus live position manager)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/heartbeat/status")
+def get_heartbeat_status_endpoint() -> dict[str, Any]:
+    """Return heartbeat enabled flag, last/next run timestamps, recent decisions."""
+    try:
+        from plugin_heartbeat import get_status
+        return {"data": get_status()}
+    except Exception as exc:
+        logger.exception("heartbeat status failed")
+        return {"error": str(exc)}
+
+
+@app.post("/api/heartbeat/pause", dependencies=[Depends(require_api_key)])
+def pause_heartbeat_endpoint() -> dict[str, Any]:
+    """Flip the Redis kill-switch to paused. The ai-brain worker reads this on next tick."""
+    try:
+        from plugin_heartbeat import set_enabled
+        return {"data": set_enabled(False)}
+    except Exception as exc:
+        logger.exception("heartbeat pause failed")
+        return {"error": str(exc)}
+
+
+@app.post("/api/heartbeat/resume", dependencies=[Depends(require_api_key)])
+def resume_heartbeat_endpoint() -> dict[str, Any]:
+    """Flip the Redis kill-switch to enabled."""
+    try:
+        from plugin_heartbeat import set_enabled
+        return {"data": set_enabled(True)}
+    except Exception as exc:
+        logger.exception("heartbeat resume failed")
+        return {"error": str(exc)}
+
+
 @app.get("/api/campaigns")
 def get_campaigns_endpoint(
     status: str | None = Query(default="open"),

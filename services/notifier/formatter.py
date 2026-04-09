@@ -120,7 +120,71 @@ _POSITION_EVENT_TITLES = {
     "campaign_manual_close": ("\u270b",     "Campaign CLOSED manually"),
     "campaign_tp":           ("\U0001f3af", "Campaign TAKE-PROFIT HIT"),
     "campaign_hard_stop":    ("\U0001f6d1", "Campaign HARD STOP HIT"),
+    # Heartbeat Opus position manager actions
+    "heartbeat_action":      ("\U0001fac0", "Heartbeat Action"),             # anatomical heart
 }
+
+
+def _format_heartbeat_action(evt: dict) -> str:
+    """Format a heartbeat_action event into a Telegram message.
+
+    Shape:
+      {type: heartbeat_action, campaign_id, action, reason, side, ...}
+      action in {close, update_levels}
+
+    `hold` never reaches the notifier — it's filtered on publish.
+    """
+    icon = "\U0001fac0"  # anatomical heart
+    camp_id = evt.get("campaign_id")
+    side = str(evt.get("side", "")).upper()
+    action = str(evt.get("action", "")).lower()
+    reason = evt.get("reason") or ""
+
+    if action == "close":
+        title = "Heartbeat CLOSED campaign"
+    elif action == "update_levels":
+        title = "Heartbeat UPDATED levels"
+    else:
+        title = f"Heartbeat {action}"
+
+    lines = [f"{icon} *{title}*"]
+    if camp_id is not None:
+        lines.append(f"Campaign #{camp_id} — {side}")
+    lines.append("")
+
+    if action == "close":
+        pnl = evt.get("realized_pnl")
+        pnl_pct = evt.get("pnl_pct_at_close")
+        if pnl is not None:
+            try:
+                pnl_f = float(pnl)
+                sign = "+" if pnl_f >= 0 else ""
+                lines.append(f"Realised P/L: {sign}${pnl_f:.2f}")
+            except (TypeError, ValueError):
+                pass
+        if pnl_pct is not None:
+            try:
+                lines.append(f"At close:     {float(pnl_pct):+.2f}%")
+            except (TypeError, ValueError):
+                pass
+    elif action == "update_levels":
+        old_tp = evt.get("old_take_profit")
+        new_tp = evt.get("new_take_profit")
+        old_sl = evt.get("old_stop_loss")
+        new_sl = evt.get("new_stop_loss")
+        if new_tp is not None or old_tp is not None:
+            lines.append(f"TP: {old_tp} → {new_tp}")
+        if new_sl is not None or old_sl is not None:
+            lines.append(f"SL: {old_sl} → {new_sl}")
+
+    if reason:
+        lines += ["", f"_{reason}_"]
+
+    ts = evt.get("timestamp")
+    if ts:
+        lines += ["", f"_at {ts}_"]
+
+    return "\n".join(lines)
 
 
 def format_marketfeed_digest(evt: dict) -> str | None:
@@ -182,6 +246,10 @@ def format_position_event(evt: dict) -> str | None:
     kind = str(evt.get("type", "")).lower()
     if kind not in _POSITION_EVENT_TITLES:
         return None
+
+    # Heartbeat events have their own custom formatter (different field shape)
+    if kind == "heartbeat_action":
+        return _format_heartbeat_action(evt)
 
     icon, title = _POSITION_EVENT_TITLES[kind]
     side = str(evt.get("side", "")).upper()
