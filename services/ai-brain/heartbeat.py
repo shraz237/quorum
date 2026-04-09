@@ -58,7 +58,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MODEL = "claude-opus-4-6"
-HEARTBEAT_INTERVAL_MINUTES = int(os.environ.get("HEARTBEAT_INTERVAL_MINUTES", "15"))
+# 5-minute default cadence — fast enough to catch intraday moves, cheap
+# enough with the hash gate active to stay well under budget. Tuned down
+# from 15 min after the user noted it felt too silent for active trading.
+HEARTBEAT_INTERVAL_MINUTES = int(os.environ.get("HEARTBEAT_INTERVAL_MINUTES", "5"))
 HEARTBEAT_INTERVAL_SECONDS = HEARTBEAT_INTERVAL_MINUTES * 60
 
 # Kill-switch defaults
@@ -74,7 +77,15 @@ LOCK_TTL_SECONDS = 120  # longer than a single Opus call (~30-60s)
 # signal is unchanged AND a decision is less than this many seconds old.
 # We still run Opus at least every HASH_MAX_SKIP_SECONDS even if the
 # hash matches, so slow-creeping state changes aren't missed.
-HASH_MAX_SKIP_SECONDS = 30 * 60  # 30 min hard ceiling
+# 15 min hard ceiling — with 5-min ticks, that means at most 3 ticks
+# in a row can skip before Opus is forced to re-reason.
+HASH_MAX_SKIP_SECONDS = 15 * 60
+
+# Status ping config — even when Opus is holding quietly, we want to
+# see the position state on Telegram regularly. Per-campaign cadence,
+# independent of whether Opus was called or the hash gate fired.
+STATUS_PING_INTERVAL_SECONDS = 20 * 60  # 20 min between status pings per campaign
+REDIS_KEY_STATUS_PING_PREFIX = "heartbeat:status_ping:"  # + campaign_id
 
 # Guardrails
 CLOSE_COOLDOWN_MINUTES = 30
@@ -815,6 +826,137 @@ def _store_decision_hash(new_hash: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Status ping — compact per-campaign Telegram message every 20 min
+# ---------------------------------------------------------------------------
+
+
+def _status_ping_due(campaign_id: int) -> bool:
+    """Return True if it's been >= STATUS_PING_INTERVAL_SECONDS since
+    the last status ping for this campaign (or if no prior ping exists)."""
+    try:
+        r = get_redis()
+        last_raw = _redis_str(r.get(f"{REDIS_KEY_STATUS_PING_PREFIX}{campaign_id}"))
+        if last_raw is None:
+            return True
+        try:
+            last_ts = float(last_raw)
+        except (TypeError, ValueError):
+            return True
+        return (time.time() - last_ts) >= STATUS_PING_INTERVAL_SECONDS
+    except Exception:
+        logger.exception("Failed to read status_ping ts for #%s", campaign_id)
+        return False  # fail-closed — don't spam on redis errors
+
+
+def _mark_status_ping(campaign_id: int) -> None:
+    try:
+        get_redis().set(f"{REDIS_KEY_STATUS_PING_PREFIX}{campaign_id}", str(time.time()))
+    except Exception:
+        logger.exception("Failed to store status_ping ts for #%s", campaign_id)
+
+
+def _build_status_ping_payload(camp_ctx: dict, latest_reason: str | None) -> dict:
+    """Compact payload for the heartbeat_status Telegram message.
+
+    `camp_ctx` is the per-campaign dict from the heartbeat context —
+    contains id, side, avg_entry, unrealized_pnl_pct, unrealized_pnl_usd,
+    take_profit, stop_loss, layers, age_hours. We derive distance-to-TP
+    and distance-to-SL in percent so the user sees proximity at a glance.
+    """
+    current_price = None
+    # camp_ctx doesn't store current_price directly, but the top-level
+    # context does. Fall back to re-reading if needed.
+    try:
+        current_price = get_current_price()
+    except Exception:
+        pass
+
+    tp = camp_ctx.get("take_profit")
+    sl = camp_ctx.get("stop_loss")
+
+    def _pct_distance(target):
+        if target is None or current_price is None or current_price <= 0:
+            return None
+        return round((target - current_price) / current_price * 100, 2)
+
+    return {
+        "type": "heartbeat_status",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "campaign_id": camp_ctx.get("id"),
+        "side": camp_ctx.get("side"),
+        "current_price": current_price,
+        "avg_entry": camp_ctx.get("avg_entry"),
+        "unrealized_pnl_usd": camp_ctx.get("unrealized_pnl_usd"),
+        "unrealized_pnl_pct": camp_ctx.get("unrealized_pnl_pct"),
+        "take_profit": tp,
+        "stop_loss": sl,
+        "distance_to_tp_pct": _pct_distance(tp),
+        "distance_to_sl_pct": _pct_distance(sl),
+        "layers": camp_ctx.get("layers"),
+        "age_hours": camp_ctx.get("age_hours"),
+        "latest_reason": (latest_reason or "")[:400],
+    }
+
+
+def _fire_status_pings(
+    context_campaigns: list[dict],
+    campaigns_with_actions: set[int],
+    opus_out: dict | None,
+) -> None:
+    """Fire Telegram status pings for campaigns that need one.
+
+    Rules:
+      - Skip campaigns that had an action (close / update_levels) on this
+        tick — they already got a dedicated Telegram alert.
+      - Fire only if ≥ STATUS_PING_INTERVAL_SECONDS since the last ping
+        for this campaign.
+      - Use the Opus decision reason from opus_out if available, else
+        fall back to the most recent heartbeat_runs row for the campaign.
+    """
+    # Build a lookup: campaign_id -> latest reason from this tick's Opus output
+    opus_reasons: dict[int, str] = {}
+    if isinstance(opus_out, dict):
+        for dec in (opus_out.get("decisions") or []):
+            cid = dec.get("campaign_id")
+            reason = dec.get("reason")
+            if isinstance(cid, int) and reason:
+                opus_reasons[cid] = str(reason)
+
+    for camp in context_campaigns:
+        cid = camp.get("id")
+        if not isinstance(cid, int):
+            continue
+        if cid in campaigns_with_actions:
+            continue  # action already fired its own alert
+        if not _status_ping_due(cid):
+            continue
+
+        reason = opus_reasons.get(cid)
+        if not reason:
+            # Fall back to latest heartbeat_runs row
+            try:
+                with SessionLocal() as session:
+                    row = (
+                        session.query(HeartbeatRun)
+                        .filter(HeartbeatRun.campaign_id == cid)
+                        .order_by(HeartbeatRun.ran_at.desc())
+                        .first()
+                    )
+                    if row is not None:
+                        reason = row.reason
+            except Exception:
+                logger.exception("Failed to read latest heartbeat_run for #%s", cid)
+
+        payload = _build_status_ping_payload(camp, reason)
+        try:
+            publish(STREAM_POSITION, payload)
+            _mark_status_ping(cid)
+            logger.info("Fired heartbeat_status ping for campaign #%s", cid)
+        except Exception:
+            logger.exception("Failed to publish heartbeat_status for #%s", cid)
+
+
+# ---------------------------------------------------------------------------
 # One full heartbeat tick
 # ---------------------------------------------------------------------------
 
@@ -869,6 +1011,10 @@ def run_tick() -> dict:
                 {"hash": decision_hash, **skip_detail},
                 True, duration,
             )
+            # Even on skipped ticks, fire status pings for any campaign
+            # that's due — the user wants to see position updates on
+            # Telegram even when Opus is quietly holding.
+            _fire_status_pings(context["open_campaigns"], set(), None)
             return {
                 "status": "skipped_unchanged",
                 "ran_at": ran_at.isoformat(),
@@ -892,6 +1038,20 @@ def run_tick() -> dict:
         # Execute each decision
         for dec in decisions:
             _execute_decision(dec, context["open_campaigns"], ran_at, opus_out)
+
+        # Build the set of campaigns that had an executed action this tick.
+        # These campaigns already fire their own Telegram alerts, so the
+        # status ping path skips them to avoid duplicate notifications.
+        # A HOLD decision still qualifies for a status ping.
+        campaigns_with_actions: set[int] = set()
+        for dec in decisions:
+            cid = dec.get("campaign_id")
+            act = dec.get("action")
+            if isinstance(cid, int) and act in ("close", "update_levels"):
+                campaigns_with_actions.add(cid)
+
+        # Fire status pings for HOLD campaigns that are due for one
+        _fire_status_pings(context["open_campaigns"], campaigns_with_actions, opus_out)
 
         # Write a tick-summary row with the overall rationale + duration
         _record_run(

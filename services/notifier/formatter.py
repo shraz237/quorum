@@ -122,9 +122,102 @@ _POSITION_EVENT_TITLES = {
     "campaign_hard_stop":    ("\U0001f6d1", "Campaign HARD STOP HIT"),
     # Heartbeat Opus position manager actions
     "heartbeat_action":      ("\U0001fac0", "Heartbeat Action"),             # anatomical heart
+    # Heartbeat periodic status ping — "still watching" updates every ~20 min
+    "heartbeat_status":      ("\U0001fac0", "Heartbeat Status"),             # anatomical heart
     # Scalp brain — ultimate scalper verdict transitions
     "scalp_brain_alert":     ("\u26a1",     "Scalp Brain"),                  # lightning
 }
+
+
+def _format_heartbeat_status(evt: dict) -> str:
+    """Compact per-campaign status ping — fired ~every 20 min while a
+    campaign is open so the user sees the bot is alive and what it's
+    thinking even when Opus is holding quietly.
+
+    Payload shape (from services/ai-brain/heartbeat.py:_build_status_ping_payload):
+      campaign_id, side, current_price, avg_entry,
+      unrealized_pnl_usd, unrealized_pnl_pct,
+      take_profit, stop_loss,
+      distance_to_tp_pct, distance_to_sl_pct,
+      layers, age_hours, latest_reason
+    """
+    icon = "\U0001fac0"  # anatomical heart
+    camp_id = evt.get("campaign_id")
+    side = str(evt.get("side", "")).upper()
+    title = "Heartbeat status"
+
+    lines = [f"{icon} *{title}*"]
+    if camp_id is not None:
+        lines.append(f"Campaign #{camp_id} — {side}")
+    lines.append("")
+
+    # Price + entry + P/L
+    price = evt.get("current_price")
+    avg_entry = evt.get("avg_entry")
+    pnl_usd = evt.get("unrealized_pnl_usd")
+    pnl_pct = evt.get("unrealized_pnl_pct")
+
+    if price is not None:
+        try:
+            lines.append(f"Price: `${float(price):.3f}`")
+        except (TypeError, ValueError):
+            pass
+    if avg_entry is not None:
+        try:
+            lines.append(f"Entry: `${float(avg_entry):.3f}`")
+        except (TypeError, ValueError):
+            pass
+    if pnl_usd is not None and pnl_pct is not None:
+        try:
+            pnl_f = float(pnl_usd)
+            pct_f = float(pnl_pct)
+            sign = "+" if pnl_f >= 0 else ""
+            lines.append(f"P/L: {sign}${pnl_f:.0f}  ({sign}{pct_f:.2f}%)")
+        except (TypeError, ValueError):
+            pass
+
+    # Distance to TP / SL
+    tp = evt.get("take_profit")
+    sl = evt.get("stop_loss")
+    d_tp = evt.get("distance_to_tp_pct")
+    d_sl = evt.get("distance_to_sl_pct")
+
+    if tp is not None:
+        try:
+            dist_str = f" ({float(d_tp):+.2f}%)" if d_tp is not None else ""
+            lines.append(f"TP: `${float(tp):.3f}`{dist_str}")
+        except (TypeError, ValueError):
+            pass
+    if sl is not None:
+        try:
+            dist_str = f" ({float(d_sl):+.2f}%)" if d_sl is not None else ""
+            lines.append(f"SL: `${float(sl):.3f}`{dist_str}")
+        except (TypeError, ValueError):
+            pass
+
+    # Layers + age
+    layers = evt.get("layers")
+    age_hours = evt.get("age_hours")
+    meta_parts = []
+    if layers is not None:
+        meta_parts.append(f"{layers} layers")
+    if age_hours is not None:
+        try:
+            meta_parts.append(f"{float(age_hours):.1f}h open")
+        except (TypeError, ValueError):
+            pass
+    if meta_parts:
+        lines.append(" · ".join(meta_parts))
+
+    reason = (evt.get("latest_reason") or "").strip()
+    if reason:
+        lines += ["", f"_{reason[:300]}_"]
+
+    ts = evt.get("timestamp")
+    if ts:
+        lines += ["", f"_at {ts}_"]
+
+    return "\n".join(lines)
 
 
 def _format_scalp_brain_alert(evt: dict) -> str:
@@ -298,6 +391,8 @@ def format_position_event(evt: dict) -> str | None:
     # Heartbeat events have their own custom formatter (different field shape)
     if kind == "heartbeat_action":
         return _format_heartbeat_action(evt)
+    if kind == "heartbeat_status":
+        return _format_heartbeat_status(evt)
     if kind == "scalp_brain_alert":
         return _format_scalp_brain_alert(evt)
 
