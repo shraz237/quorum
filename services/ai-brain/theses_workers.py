@@ -40,6 +40,20 @@ RESOLVER_INTERVAL_SECONDS = 5 * 60
 STREAM_POSITION = "position.event"
 
 
+def _is_test_thesis(thesis: Thesis) -> bool:
+    """Return True if this thesis came from a smoke-test source.
+
+    Convention: any created_by starting with 'smoke' (e.g. 'smoke_test',
+    'smoke_watcher_test') is treated as a test thesis. Every published
+    event for this thesis will carry is_test=True so Telegram renders
+    a loud 🧪 TEST marker in the title — user cannot confuse a test
+    with a real thesis lifecycle event.
+    """
+    if thesis is None or not thesis.created_by:
+        return False
+    return thesis.created_by.lower().startswith("smoke")
+
+
 def _publish_trigger(thesis: Thesis, snapshot: dict) -> None:
     try:
         payload = {
@@ -58,6 +72,8 @@ def _publish_trigger(thesis: Thesis, snapshot: dict) -> None:
             "planned_size_margin": thesis.planned_size_margin,
             "created_by": thesis.created_by,
         }
+        if _is_test_thesis(thesis):
+            payload["is_test"] = True
         publish(STREAM_POSITION, payload)
         logger.info("Published thesis_triggered for #%s", thesis.id)
     except Exception:
@@ -75,6 +91,8 @@ def _publish_resolved(thesis: Thesis, outcome_payload: dict) -> None:
             "planned_action": thesis.planned_action,
             **outcome_payload,
         }
+        if _is_test_thesis(thesis):
+            payload["is_test"] = True
         publish(STREAM_POSITION, payload)
         logger.info("Published thesis_resolved for #%s: %s", thesis.id, outcome_payload.get("outcome"))
     except Exception:
