@@ -1012,26 +1012,6 @@ def _maybe_autopropose_thesis(result: dict) -> None:
         new_id, intended_side, verdict, conviction,
     )
 
-    # Publish a thesis_created event for Telegram
-    try:
-        _publish(
-            "position.event",
-            {
-                "type": "thesis_created",
-                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                "thesis_id": new_id,
-                "domain": "scalp",
-                "title": title,
-                "thesis_text": thesis_text,
-                "trigger_type": "scalp_brain_state",
-                "trigger_params": {"state": trigger_state},
-                "planned_action": intended_side,
-                "planned_entry": levels.get("entry"),
-                "planned_stop_loss": levels.get("stop_loss"),
-                "planned_take_profit": levels.get("take_profit_1"),
-                "planned_size_margin": 1000,
-                "created_by": "scalp_brain",
-            },
-        )
-    except Exception:
-        logger.exception("scalp_brain: failed to publish thesis_created")
+    # NO thesis_created event — silent save. The user sees these in the
+    # dashboard Theses tab (Scalp section). Only thesis_triggered events
+    # reach Telegram to keep the feed quiet.

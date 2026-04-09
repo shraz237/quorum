@@ -271,6 +271,23 @@ RULES:
    tick, holding again is fine; but if you're changing your mind, cite
    what changed.
 
+8. PENDING THESES ARE IDEAS YOU ALREADY HAVE. The context contains a
+   `pending_theses` list — forward-looking plans from the user (chat),
+   previous heartbeat ticks (including your own earlier proposals),
+   and the scalp brain. These are CONDITIONS THE BOT IS ALREADY
+   WATCHING. You should:
+     a) USE them when reasoning — if a pending thesis says 'close if
+        unified score ≥ 15', and you're considering a close because
+        score is rising, reference the thesis in your reason.
+     b) NEVER PROPOSE DUPLICATES. Before emitting a propose_theses
+        entry, scan the pending list: is there already a thesis with
+        the same trigger_type + similar trigger_params + same planned
+        side? If yes, don't propose another one.
+     c) PROPOSE SPARINGLY. At most 1-2 new theses per tick — only when
+        you identify a genuinely new condition worth watching.
+     d) The user sees pending theses in the dashboard Theses tab; you
+        can assume they know about them.
+
 Use the manage_campaigns tool to return your decisions.
 """
 
@@ -471,6 +488,48 @@ def _get_account_snapshot() -> dict | None:
         return None
 
 
+def _get_pending_theses_for_context(limit: int = 20) -> list[dict]:
+    """Load currently-pending theses so Opus can use them as ideas.
+
+    Returns a compact list (campaign + scalp domains) sorted by most
+    recent first, with enough fields for Opus to understand each
+    thesis's intent and trigger condition but not so many that the
+    context bloats.
+
+    Filters out smoke-test rows so Opus never considers test noise.
+    """
+    try:
+        from shared.models.theses import Thesis
+        with SessionLocal() as session:
+            rows = (
+                session.query(Thesis)
+                .filter(Thesis.status == "pending")
+                .filter(~Thesis.created_by.like("smoke%"))
+                .order_by(Thesis.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+            return [
+                {
+                    "id": r.id,
+                    "domain": r.domain,
+                    "created_by": r.created_by,
+                    "title": r.title,
+                    "thesis_text": (r.thesis_text or "")[:500],
+                    "trigger_type": r.trigger_type,
+                    "trigger_params": r.trigger_params,
+                    "planned_action": r.planned_action,
+                    "planned_entry": r.planned_entry,
+                    "planned_stop_loss": r.planned_stop_loss,
+                    "planned_take_profit": r.planned_take_profit,
+                }
+                for r in rows
+            ]
+    except Exception:
+        logger.exception("Failed to load pending theses for heartbeat context")
+        return []
+
+
 def _build_campaign_snapshot(campaign_id: int, current_price: float | None) -> dict | None:
     """Build the per-campaign payload for Opus."""
     state = compute_campaign_state(campaign_id, current_price)
@@ -530,6 +589,13 @@ def _build_context(open_campaign_ids: list[int]) -> dict:
         "latest_scores": _get_latest_scores(),
         "recent_news": _get_recent_news(30),
         "open_campaigns": campaigns,
+        # Pending forward-looking plans from user, prior heartbeats, and
+        # the scalp brain. Opus should read these as IDEAS — hints about
+        # conditions the bot is already watching for. Opus can validate,
+        # absorb, or ignore them, but must NEVER duplicate one already
+        # in this list (the propose_theses dedupe does the mechanical
+        # check but Opus should self-filter first).
+        "pending_theses": _get_pending_theses_for_context(),
     }
 
 
@@ -847,13 +913,65 @@ def _execute_decision(
 # ---------------------------------------------------------------------------
 
 
-def _process_proposed_theses(proposals: list) -> None:
-    """Save up to 3 Opus-proposed theses from a heartbeat tick.
+def _proposal_matches_existing(
+    proposal: dict, existing_pending: list[dict]
+) -> bool:
+    """True if a similar pending thesis already exists.
 
-    Each proposal becomes a pending thesis row in the campaign domain
-    with created_by='heartbeat'. A thesis_created event is published so
-    the user sees it on Telegram immediately. Silent on failure — this
-    is a nice-to-have and must never break the heartbeat tick.
+    Match criteria (all must agree):
+      - same trigger_type
+      - same planned_action (LONG/SHORT/etc)
+      - same trigger price rounded to $0.50 (for price triggers)
+        OR same trigger score rounded to 5 (for score triggers)
+        OR same minutes bucket rounded to 15 (for time_elapsed)
+
+    Keeps Opus from re-proposing "close if unified > 15" every single
+    tick when there's already a pending thesis with that condition.
+    """
+    tt = proposal.get("trigger_type")
+    action = proposal.get("planned_action")
+    params = proposal.get("trigger_params") or {}
+
+    def _bucket(val, step):
+        if val is None:
+            return None
+        try:
+            return round(float(val) / step) * step
+        except (TypeError, ValueError):
+            return None
+
+    proposed_price = _bucket(params.get("price"), 0.5) if "price" in params else None
+    proposed_score = _bucket(params.get("score"), 5) if "score" in params else None
+    proposed_mins = _bucket(params.get("minutes"), 15) if "minutes" in params else None
+
+    for existing in existing_pending:
+        if existing.get("trigger_type") != tt:
+            continue
+        if existing.get("planned_action") != action:
+            continue
+        ex_params = existing.get("trigger_params") or {}
+        if proposed_price is not None:
+            if _bucket(ex_params.get("price"), 0.5) == proposed_price:
+                return True
+        if proposed_score is not None:
+            if _bucket(ex_params.get("score"), 5) == proposed_score:
+                return True
+        if proposed_mins is not None:
+            if _bucket(ex_params.get("minutes"), 15) == proposed_mins:
+                return True
+    return False
+
+
+def _process_proposed_theses(proposals: list, existing_pending: list[dict] | None = None) -> None:
+    """Save Opus-proposed theses from a heartbeat tick.
+
+    Caps at 2 per tick and dedupes against existing pending theses so
+    we don't spam the theses table (or the Telegram feed) with the
+    same 'close if unified > 15' proposal every 5 minutes.
+
+    No thesis_created event is published any more — that was removed
+    in favour of a silent save (user sees pending theses in the
+    dashboard Theses tab). Only thesis_triggered hits Telegram.
     """
     if not isinstance(proposals, list) or not proposals:
         return
@@ -864,7 +982,13 @@ def _process_proposed_theses(proposals: list) -> None:
         logger.exception("heartbeat: failed to import create_thesis")
         return
 
-    for proposal in proposals[:3]:  # hard cap at 3 per tick
+    existing = existing_pending or []
+
+    accepted = 0
+    for proposal in proposals:
+        if accepted >= 2:  # hard cap per tick — was 3, dropped to 2
+            logger.info("Heartbeat: hit 2-proposal cap, dropping remaining %d", len(proposals) - accepted)
+            break
         if not isinstance(proposal, dict):
             continue
         try:
@@ -875,6 +999,15 @@ def _process_proposed_theses(proposals: list) -> None:
             planned_action = proposal.get("planned_action") or "WATCH"
             if not title or not thesis_text or not trigger_type:
                 continue
+
+            # Dedupe against existing pending theses
+            if _proposal_matches_existing(proposal, existing):
+                logger.info(
+                    "Heartbeat: dedupe — proposal %r already has a matching pending thesis",
+                    title[:60],
+                )
+                continue
+
             new_id = create_thesis(
                 created_by="heartbeat",
                 domain="campaign",
@@ -891,30 +1024,10 @@ def _process_proposed_theses(proposals: list) -> None:
             )
             if new_id is None:
                 continue
+            accepted += 1
             logger.info("Heartbeat proposed thesis #%s: %r", new_id, title[:80])
-            # Publish a thesis_created event so Telegram renders it
-            try:
-                publish(
-                    STREAM_POSITION,
-                    {
-                        "type": "thesis_created",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "thesis_id": new_id,
-                        "domain": "campaign",
-                        "title": title,
-                        "thesis_text": thesis_text,
-                        "trigger_type": trigger_type,
-                        "trigger_params": trigger_params,
-                        "planned_action": planned_action,
-                        "planned_entry": proposal.get("planned_entry"),
-                        "planned_stop_loss": proposal.get("planned_stop_loss"),
-                        "planned_take_profit": proposal.get("planned_take_profit"),
-                        "planned_size_margin": proposal.get("planned_size_margin"),
-                        "created_by": "heartbeat",
-                    },
-                )
-            except Exception:
-                logger.exception("Failed to publish thesis_created for heartbeat proposal")
+            # NO thesis_created event — silent save. User sees it in the
+            # Theses tab; only thesis_triggered reaches Telegram.
         except Exception:
             logger.exception("heartbeat: failed to save a proposed thesis")
 
@@ -1243,9 +1356,13 @@ def run_tick() -> dict:
             _execute_decision(dec, context["open_campaigns"], ran_at, opus_out)
 
         # Process optional forward-looking thesis proposals from Opus.
-        # These never execute anything — they save pending thesis rows
-        # the user can review (and the watcher will alert on trigger).
-        _process_proposed_theses(opus_out.get("propose_theses") or [])
+        # Dedupe against the pending theses that were already in context,
+        # so Opus can't re-propose the same 'close if score > 15' on
+        # every single tick.
+        _process_proposed_theses(
+            opus_out.get("propose_theses") or [],
+            existing_pending=context.get("pending_theses") or [],
+        )
 
         # Build the set of campaigns that had an executed action this tick.
         # These campaigns already fire their own Telegram alerts, so the

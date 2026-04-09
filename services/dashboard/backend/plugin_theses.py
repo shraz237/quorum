@@ -104,31 +104,9 @@ def create_from_form(payload: dict) -> dict:
     )
     if new_id is None:
         return {"error": "failed to create thesis (validation or DB)"}
-
-    # Also publish a thesis_created event so Telegram gets a confirmation
-    try:
-        from shared.redis_streams import publish
-        publish(
-            "position.event",
-            {
-                "type": "thesis_created",
-                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                "thesis_id": new_id,
-                "domain": payload.get("domain", "campaign"),
-                "title": payload["title"],
-                "thesis_text": payload["thesis_text"],
-                "trigger_type": payload["trigger_type"],
-                "trigger_params": payload["trigger_params"],
-                "planned_action": payload["planned_action"],
-                "planned_entry": payload.get("planned_entry"),
-                "planned_stop_loss": payload.get("planned_stop_loss"),
-                "planned_take_profit": payload.get("planned_take_profit"),
-                "created_by": "user_form",
-            },
-        )
-    except Exception:
-        logger.exception("Failed to publish thesis_created")
-
+    # NO thesis_created Telegram publish — the form response already
+    # confirms creation, and the row is visible in the dashboard
+    # Theses tab. Only thesis_triggered events reach Telegram.
     return {"thesis_id": new_id, "status": "pending"}
 
 

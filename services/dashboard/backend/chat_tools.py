@@ -349,28 +349,9 @@ def _create_thesis(
     )
     if new_id is None:
         return {"error": "failed to create thesis (validation or DB)"}
-    # Publish a thesis_created event so Telegram/notifier renders a confirmation
-    try:
-        publish(
-            "position.event",
-            {
-                "type": "thesis_created",
-                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                "thesis_id": new_id,
-                "domain": "campaign",
-                "title": title,
-                "thesis_text": thesis_text,
-                "trigger_type": trigger_type,
-                "trigger_params": trigger_params,
-                "planned_action": planned_action,
-                "planned_entry": planned_entry,
-                "planned_stop_loss": planned_stop_loss,
-                "planned_take_profit": planned_take_profit,
-                "created_by": "user_chat",
-            },
-        )
-    except Exception:
-        logger.exception("Failed to publish thesis_created event")
+    # NO thesis_created Telegram publish — the chat reply already confirms
+    # creation to the user, and they can see it in the dashboard Theses tab.
+    # Only thesis_triggered events reach Telegram to keep the feed quiet.
     return {"thesis_id": new_id, "title": title, "status": "pending"}
 
 
