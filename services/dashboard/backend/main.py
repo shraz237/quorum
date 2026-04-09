@@ -461,6 +461,20 @@ def get_cvd_endpoint(minutes: int = Query(default=60, ge=5, le=500)) -> dict[str
         return {"error": str(exc)}
 
 
+@app.get("/api/scalping-range")
+def get_scalping_range_endpoint(
+    timeframe: str = Query(default="5min"),
+    lookback_hours: int = Query(default=4, ge=1, le=24),
+) -> dict[str, Any]:
+    """Short-timeframe scalping range + suggested long/short entries with SL/TP."""
+    try:
+        from plugin_scalping import compute_scalping_range
+        return {"data": compute_scalping_range(timeframe=timeframe, lookback_hours=lookback_hours)}
+    except Exception as exc:
+        logger.exception("scalping range failed")
+        return {"error": str(exc)}
+
+
 @app.get("/api/vwap")
 def get_vwap_endpoint(
     timeframe: str = Query(default="1H"),

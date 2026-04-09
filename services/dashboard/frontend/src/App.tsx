@@ -17,6 +17,7 @@ import RiskToolsPanel from "./components/RiskToolsPanel";
 import CrossContextPanel from "./components/CrossContextPanel";
 import LearningPanel from "./components/LearningPanel";
 import LivePriceTicker from "./components/LivePriceTicker";
+import ScalpingRangePanel from "./components/ScalpingRangePanel";
 
 // ---------------------------------------------------------------------------
 // Types matching the backend JSON
@@ -203,6 +204,9 @@ const App: React.FC = () => {
 
       {/* Account Panel */}
       <AccountPanel />
+
+      {/* Scalping Range — 5-min entries for intraday scalping */}
+      <ScalpingRangePanel />
 
       {/* Risk & Scenario Tools — scenario calculator, Monte Carlo, VWAP, calendar */}
       <RiskToolsPanel />
