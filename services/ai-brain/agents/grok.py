@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import time as _time
 from datetime import datetime, timedelta, timezone
 
 from openai import OpenAI
 from sqlalchemy import desc
 
 from shared.config import settings
+from shared.llm_usage import record_failure, record_openai_compatible_call
 from shared.models.base import SessionLocal
 from shared.models.ohlcv import OHLCV
 from shared.models.sentiment import SentimentTwitter
@@ -69,15 +71,29 @@ def _live_grok_call() -> str:
         "If you reference price levels, use only the FACT above."
     )
 
+    call_start = _time.time()
     try:
         response = client.chat.completions.create(
             model=MODEL,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
+        record_openai_compatible_call(
+            call_site="twitter_narrative.grok",
+            model=MODEL,
+            usage=response.usage,
+            duration_ms=(_time.time() - call_start) * 1000,
+            provider="xai",
+        )
         return response.choices[0].message.content.strip()
     except Exception:
         logger.exception("Grok live API call failed")
+        record_failure(
+            call_site="twitter_narrative.grok",
+            model=MODEL,
+            provider="xai",
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         return FALLBACK
 
 

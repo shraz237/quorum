@@ -36,6 +36,7 @@ from datetime import datetime, timedelta, timezone
 from anthropic import Anthropic
 
 from shared.config import settings
+from shared.llm_usage import record_anthropic_call, record_failure
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +320,7 @@ def compute_now_brief(force: bool = False) -> dict:
             "Produce the brief now. Return ONLY the JSON object."
         )
 
+        call_start = time.time()
         try:
             response = _get_client().messages.create(
                 model=MODEL,
@@ -326,11 +328,23 @@ def compute_now_brief(force: bool = False) -> dict:
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
             )
+            record_anthropic_call(
+                call_site="now_brief.haiku",
+                model=MODEL,
+                usage=response.usage,
+                duration_ms=(time.time() - call_start) * 1000,
+            )
             raw = response.content[0].text if response.content else ""
             cleaned = _strip_json(raw)
             parsed = json.loads(cleaned)
         except Exception as exc:
             logger.exception("Now Brief generation failed")
+            record_failure(
+                call_site="now_brief.haiku",
+                model=MODEL,
+                provider="anthropic",
+                duration_ms=(time.time() - call_start) * 1000,
+            )
             return {
                 "error": f"brief generation failed: {exc}",
                 "generated_at": datetime.now(tz=timezone.utc).isoformat(),

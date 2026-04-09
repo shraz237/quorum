@@ -7,9 +7,12 @@ import logging
 import re
 from datetime import datetime, timezone
 
+import time as _time
+
 from anthropic import Anthropic
 
 from shared.config import settings
+from shared.llm_usage import record_anthropic_call, record_failure
 from shared.models.base import SessionLocal
 from shared.models.knowledge import KnowledgeSummary
 from shared.models.ohlcv import OHLCV
@@ -414,6 +417,7 @@ def synthesize_recommendation(
 
     timestamp = datetime.now(timezone.utc)
 
+    call_start = _time.time()
     try:
         # Task 6: Structured output via Anthropic tools (eliminates regex parsing)
         response = client.messages.create(
@@ -423,6 +427,12 @@ def synthesize_recommendation(
             tools=[RECOMMENDATION_TOOL],
             tool_choice={"type": "tool", "name": "submit_trading_recommendation"},
             messages=[{"role": "user", "content": user_prompt}],
+        )
+        record_anthropic_call(
+            call_site="recommendation.opus",
+            model=MODEL,
+            usage=response.usage,
+            duration_ms=(_time.time() - call_start) * 1000,
         )
 
         rec = None
@@ -436,6 +446,12 @@ def synthesize_recommendation(
             rec = dict(FALLBACK_REC)
     except Exception:
         logger.exception("Opus synthesize_recommendation failed")
+        record_failure(
+            call_site="recommendation.opus",
+            model=MODEL,
+            provider="anthropic",
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         rec = dict(FALLBACK_REC)
 
     # Attach context fields

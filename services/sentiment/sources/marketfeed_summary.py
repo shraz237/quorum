@@ -132,6 +132,9 @@ def collect_and_store() -> None:
         count=len(rows), window=_WINDOW_MINUTES, headlines=headlines
     )
 
+    import time as _time
+    from shared.llm_usage import record_anthropic_call, record_failure
+    call_start = _time.time()
     try:
         response = _get_client().messages.create(
             model=_HAIKU_MODEL,
@@ -139,10 +142,22 @@ def collect_and_store() -> None:
             system=_SUMMARY_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
+        record_anthropic_call(
+            call_site="marketfeed.haiku_digest",
+            model=_HAIKU_MODEL,
+            usage=response.usage,
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         raw = response.content[0].text
         data = json.loads(_strip_json(raw))
     except Exception:
         logger.exception("Haiku marketfeed digest failed — raw=%r", locals().get("raw", ""))
+        record_failure(
+            call_site="marketfeed.haiku_digest",
+            model=_HAIKU_MODEL,
+            provider="anthropic",
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         return
 
     summary_text = str(data.get("summary", "")).strip()

@@ -1012,6 +1012,31 @@ def get_liquidations(
 
 
 # ---------------------------------------------------------------------------
+# LLM usage rollups — token + cost tracker
+# ---------------------------------------------------------------------------
+
+@app.get("/api/llm-usage")
+def get_llm_usage_endpoint() -> dict[str, Any]:
+    """Rollups of every LLM call the bot has made.
+
+    Reads the llm_usage table (populated by shared/llm_usage.py from every
+    call site across ai-brain / dashboard / sentiment) and returns:
+
+      - today / yesterday / last_7d / last_30d totals + breakdowns
+      - by_call_site, by_model, by_service
+      - cache_savings_usd (how much prompt caching has saved)
+      - hourly_24h cost sparkline
+      - heartbeat_24h skip ratio (how often the hash gate avoids Opus)
+    """
+    try:
+        from plugin_llm_usage import get_llm_usage_rollup
+        return {"data": get_llm_usage_rollup()}
+    except Exception as exc:
+        logger.exception("llm-usage endpoint failed")
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # Heartbeat (Opus live position manager)
 # ---------------------------------------------------------------------------
 

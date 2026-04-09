@@ -49,6 +49,7 @@ from shared.position_manager import (
     update_campaign_levels,
 )
 from shared.redis_streams import get_redis, publish
+from shared.llm_usage import record_anthropic_call, record_failure
 
 logger = logging.getLogger(__name__)
 
@@ -444,6 +445,7 @@ def _call_opus(context: dict) -> dict | None:
         "manage_campaigns tool."
     )
 
+    call_start = time.time()
     try:
         response = client.messages.create(
             model=MODEL,
@@ -465,11 +467,23 @@ def _call_opus(context: dict) -> dict | None:
             tool_choice={"type": "tool", "name": "manage_campaigns"},
             messages=[{"role": "user", "content": user_prompt}],
         )
+        record_anthropic_call(
+            call_site="heartbeat.opus",
+            model=MODEL,
+            usage=response.usage,
+            duration_ms=(time.time() - call_start) * 1000,
+        )
         for block in response.content:
             if block.type == "tool_use" and block.name == "manage_campaigns":
                 return block.input
     except Exception:
         logger.exception("Heartbeat Opus call failed")
+        record_failure(
+            call_site="heartbeat.opus",
+            model=MODEL,
+            provider="anthropic",
+            duration_ms=(time.time() - call_start) * 1000,
+        )
         return None
 
     logger.error("Heartbeat Opus did not return a manage_campaigns tool_use block")

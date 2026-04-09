@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import time as _time
 
 import anthropic
 from sqlalchemy import desc
 
 from shared.config import settings
+from shared.llm_usage import record_anthropic_call, record_failure
 from shared.models.base import SessionLocal
 from shared.models.ohlcv import OHLCV
 
@@ -81,13 +83,26 @@ def summarize_scores(scores: dict) -> str:
         "Be direct and factual."
     )
 
+    call_start = _time.time()
     try:
         response = client.messages.create(
             model=MODEL,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
+        record_anthropic_call(
+            call_site="score_summary.haiku",
+            model=MODEL,
+            usage=response.usage,
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         return response.content[0].text.strip()
     except Exception:
         logger.exception("Haiku summarize_scores failed")
+        record_failure(
+            call_site="score_summary.haiku",
+            model=MODEL,
+            provider="anthropic",
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         return FALLBACK

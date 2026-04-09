@@ -39,12 +39,18 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from anthropic import Anthropic
 
 from shared.config import settings
+from shared.llm_usage import (
+    record_anthropic_call,
+    record_failure,
+    record_openai_compatible_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1032,6 +1038,7 @@ def _run_agent(system_prompt: str, context: dict, label: str) -> dict:
     )
 
     raw = ""
+    call_start = _time.time()
     try:
         response = _get_client().messages.create(
             model=BULL_BEAR_MODEL,
@@ -1047,6 +1054,12 @@ def _run_agent(system_prompt: str, context: dict, label: str) -> dict:
             ],
             messages=[{"role": "user", "content": user_prompt}],
         )
+        record_anthropic_call(
+            call_site=f"committee.{label}",
+            model=BULL_BEAR_MODEL,
+            usage=response.usage,
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         raw = response.content[0].text if response.content else ""
         cleaned = _strip_json(raw)
         parsed = json.loads(cleaned)
@@ -1061,6 +1074,12 @@ def _run_agent(system_prompt: str, context: dict, label: str) -> dict:
         }
     except Exception as exc:
         logger.exception("%s agent failed", label)
+        record_failure(
+            call_site=f"committee.{label}",
+            model=BULL_BEAR_MODEL,
+            provider="anthropic",
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         return {
             "status": "agent_failed",
             "error": f"{type(exc).__name__}: {exc}",
@@ -1091,6 +1110,7 @@ def _run_grok_agent(system_prompt: str, context: dict, label: str) -> dict:
     )
 
     raw = ""
+    call_start = _time.time()
     try:
         response = _get_grok_client().chat.completions.create(
             model=GROK_MODEL,
@@ -1099,6 +1119,13 @@ def _run_grok_agent(system_prompt: str, context: dict, label: str) -> dict:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+        )
+        record_openai_compatible_call(
+            call_site=f"committee.{label}",
+            model=GROK_MODEL,
+            usage=response.usage,
+            duration_ms=(_time.time() - call_start) * 1000,
+            provider="xai",
         )
         raw = response.choices[0].message.content or ""
         cleaned = _strip_json(raw)
@@ -1114,6 +1141,12 @@ def _run_grok_agent(system_prompt: str, context: dict, label: str) -> dict:
         }
     except Exception as exc:
         logger.exception("%s grok agent failed", label)
+        record_failure(
+            call_site=f"committee.{label}",
+            model=GROK_MODEL,
+            provider="xai",
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         return {
             "status": "agent_failed",
             "error": f"{type(exc).__name__}: {exc}",
@@ -1161,6 +1194,7 @@ def _run_judge(context: dict, bull_team: dict[str, dict], bear_team: dict[str, d
         "Render your verdict now. Return ONLY the JSON object."
     )
 
+    call_start = _time.time()
     try:
         response = _get_client().messages.create(
             model=JUDGE_MODEL,
@@ -1177,11 +1211,23 @@ def _run_judge(context: dict, bull_team: dict[str, dict], bear_team: dict[str, d
             ],
             messages=[{"role": "user", "content": user_prompt}],
         )
+        record_anthropic_call(
+            call_site="committee.judge",
+            model=JUDGE_MODEL,
+            usage=response.usage,
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         raw = response.content[0].text if response.content else ""
         cleaned = _strip_json(raw)
         return json.loads(cleaned)
     except Exception as exc:
         logger.exception("Judge failed")
+        record_failure(
+            call_site="committee.judge",
+            model=JUDGE_MODEL,
+            provider="anthropic",
+            duration_ms=(_time.time() - call_start) * 1000,
+        )
         return {"error": f"judge failed: {exc}"}
 
 

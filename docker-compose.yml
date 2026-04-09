@@ -54,6 +54,8 @@ services:
       redis:
         condition: service_healthy
     env_file: .env
+    environment:
+      SERVICE_NAME: sentiment
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
@@ -88,6 +90,8 @@ services:
       redis:
         condition: service_healthy
     env_file: .env
+    environment:
+      SERVICE_NAME: ai-brain
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
@@ -140,6 +144,7 @@ services:
     env_file: .env
     environment:
       DOCKER_HOST: tcp://docker-proxy:2375
+      SERVICE_NAME: dashboard
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]

@@ -207,6 +207,8 @@ def stream_chat(message: str, session_id: str = "default") -> Generator[str, Non
     max_iterations = 20
     for iteration in range(max_iterations):
         try:
+            import time as _time
+            call_start = _time.time()
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=1500,
@@ -226,6 +228,16 @@ def stream_chat(message: str, session_id: str = "default") -> Generator[str, Non
                 tools=TOOLS,
                 messages=history,
             )
+            try:
+                from shared.llm_usage import record_anthropic_call
+                record_anthropic_call(
+                    call_site="chat.sonnet",
+                    model=MODEL,
+                    usage=response.usage,
+                    duration_ms=(_time.time() - call_start) * 1000,
+                )
+            except Exception:
+                logger.exception("chat llm_usage record failed")
         except Exception as exc:
             logger.exception("Anthropic API call failed (iteration %d)", iteration)
             yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
