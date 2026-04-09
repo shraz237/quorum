@@ -42,10 +42,42 @@ _OUTPUT_SCHEMA_BEAR = _OUTPUT_SCHEMA_BULL.replace('"side": "LONG"', '"side": "SH
 
 _COMMON_RULES = """Rules:
   - Cite SPECIFIC data from the context (scores, price levels, digest IDs, specific events).
-  - Stay IN YOUR LANE — do not argue points outside your specialty, other agents cover them.
+  - Stay IN YOUR LANE for the PRIMARY thesis and key arguments — other specialists
+    cover their own domains and the Judge reconciles them.
+  - HOWEVER, you may reference out-of-lane data AS CONTEXT when it directly amplifies
+    or undermines your thesis. E.g. a technicals bull can note "funding -0.30% adds
+    squeeze-risk fuel to this bid defense" without making macro the main argument.
   - If your angle is weak given current data, honestly mark case_strength "weak" but still
     make the best argument you can from your specialty.
   - Never invent data. Use only what's in the context.
+
+Available data in the context dict (use any of these, cite specifically):
+  - market: current price, all 5 scores, open campaigns, account state
+  - news: recent @marketfeed digests with sentiment
+  - support_resistance: key S/R levels from 1H data
+  - vwap_24h / vwap_168h: session + weekly VWAP with distance pct
+  - pivot_points: classic daily pivot, R1/R2/S1/S2 and current position
+  - upcoming_events: 7-day economic calendar (EIA, FOMC, OPEC, IEA)
+  - active_watch: any active live-watch monitoring session
+  - conviction: composite 0-100 meter with top drivers
+  - anomalies.current: currently-firing rare/extreme conditions
+  - anomalies.recent_24h: log of anomalies that fired in last 24h
+  - binance_metrics: funding rate history, open interest (+ 24h change pct),
+    top trader / global retail long pct, retail-vs-smart delta, taker flow,
+    liquidations 24h summary with dominant side
+  - orderbook: mid, best bid/ask, total depth, imbalance pct, top 5 levels
+  - whale_trades: 24h aggregated >= $10k trades (buy/sell/delta USD, dominant side)
+  - volume_profile: POC (point of control), value area (70% volume range)
+  - cvd: Cumulative Volume Delta + divergence detection
+  - cross_assets: DXY / SPX / Gold / BTC / VIX levels + 24h change + correlation
+  - scenarios: PnL/equity/margin at price offsets, key levels (breakeven, stop-out)
+  - monte_carlo_24h: GBM simulation — probability of margin call / -50% hard stop
+  - trade_journal.stats: user's own win rate, profit factor, avg win/loss
+  - trade_journal.recent_trades: last 10 closed campaigns with outcomes
+  - pattern_match: top-N historically similar moments + forward return distribution
+  - signal_performance: per-feature bucket stats (does high unified score actually
+    predict forward returns?)
+  - smart_alerts: user-configured confluence alerts with current match status
 """
 
 # ===========================================================================
@@ -294,9 +326,19 @@ def _strip_json(text: str) -> str:
 
 
 def _fetch_context(focus_hours: int) -> dict:
-    """Pre-fetch the same market context for both agents. No LLM calls here."""
+    """Pre-fetch EVERY data surface the dashboard has into one dict.
+
+    The committee specialists get access to the full situational picture —
+    scores, news, Binance derivatives, microstructure, cross-assets, flow,
+    risk scenarios, history, anomalies — so each can cite specific data
+    from outside its "lane" when the evidence is unambiguous (e.g. a
+    technicals bull referencing funding-extreme as context for why dips
+    are getting bought). Failures in sub-fetches become error strings
+    so one broken source can't crash the whole debate.
+    """
     context: dict = {}
 
+    # ---- Market state & news (existing) ----
     try:
         from chat_tools import _get_current_market_state
         context["market"] = _get_current_market_state()
@@ -309,23 +351,326 @@ def _fetch_context(focus_hours: int) -> dict:
     except Exception as exc:
         context["news"] = {"error": str(exc)}
 
+    # ---- Technical context: S/R, VWAP, pivots, events ----
     try:
-        from plugin_analytics import _get_support_resistance, _get_vwap, _get_upcoming_events
+        from plugin_analytics import (
+            _get_support_resistance,
+            _get_vwap,
+            _get_upcoming_events,
+            _get_pivot_points,
+        )
         context["support_resistance"] = _get_support_resistance(timeframe="1H", lookback_bars=100)
-        context["vwap"] = _get_vwap(timeframe="1H", hours=24)
-        context["upcoming_events"] = _get_upcoming_events(days=2)
+        context["vwap_24h"] = _get_vwap(timeframe="1H", hours=24)
+        context["vwap_168h"] = _get_vwap(timeframe="1H", hours=168)
+        context["pivot_points"] = _get_pivot_points()
+        context["upcoming_events"] = _get_upcoming_events(days=7)
     except Exception as exc:
-        logger.exception("analytics sub-tool failed in committee context fetch")
+        logger.exception("analytics sub-tool failed")
         context["analytics_error"] = str(exc)
 
-    # Active live-watch session — so the committee knows if the user is already
-    # monitoring the same setup and can reference it in its verdict.
+    # ---- Live watch session ----
     try:
         from plugin_live_watch import _get_active_watch
         context["active_watch"] = _get_active_watch()
     except Exception as exc:
-        logger.warning("active_watch fetch failed: %s", exc)
         context["active_watch"] = {"error": str(exc)}
+
+    # ---- Conviction meter + top drivers ----
+    try:
+        from plugin_conviction import compute_conviction
+        context["conviction"] = compute_conviction()
+    except Exception as exc:
+        context["conviction"] = {"error": str(exc)}
+
+    # ---- Anomaly radar (currently active + recent history) ----
+    try:
+        from plugin_anomalies import detect_anomalies, get_anomaly_history
+        context["anomalies"] = {
+            "current": detect_anomalies(),
+            "recent_24h": get_anomaly_history(hours=24, limit=30),
+        }
+    except Exception as exc:
+        context["anomalies"] = {"error": str(exc)}
+
+    # ---- Binance derivatives metrics (funding, OI, L/S, liquidations) ----
+    try:
+        from shared.models.base import SessionLocal
+        from shared.models.binance_metrics import (
+            BinanceFundingRate,
+            BinanceOpenInterest,
+            BinanceLongShortRatio,
+            BinanceLiquidation,
+        )
+        from sqlalchemy import desc, func
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        now = _dt.now(tz=_tz.utc)
+        with SessionLocal() as session:
+            fr = (
+                session.query(BinanceFundingRate)
+                .order_by(desc(BinanceFundingRate.funding_time))
+                .limit(5).all()
+            )
+            oi_latest = (
+                session.query(BinanceOpenInterest)
+                .order_by(desc(BinanceOpenInterest.timestamp))
+                .first()
+            )
+            oi_24h_ago = (
+                session.query(BinanceOpenInterest)
+                .filter(BinanceOpenInterest.timestamp <= now - _td(hours=24))
+                .order_by(desc(BinanceOpenInterest.timestamp))
+                .first()
+            )
+            oi_change_pct = None
+            if oi_latest and oi_24h_ago and oi_24h_ago.open_interest:
+                oi_change_pct = round(
+                    (oi_latest.open_interest - oi_24h_ago.open_interest)
+                    / oi_24h_ago.open_interest * 100, 2,
+                )
+
+            def _latest(rt):
+                return (
+                    session.query(BinanceLongShortRatio)
+                    .filter(BinanceLongShortRatio.ratio_type == rt)
+                    .order_by(desc(BinanceLongShortRatio.timestamp))
+                    .first()
+                )
+            top = _latest("top_position")
+            glob = _latest("global_account")
+            taker = _latest("taker")
+
+            liq_24h = now - _td(hours=24)
+            longs_liq = session.query(func.sum(BinanceLiquidation.quote_qty_usd)).filter(
+                BinanceLiquidation.timestamp >= liq_24h,
+                BinanceLiquidation.side == "SELL",
+            ).scalar() or 0
+            shorts_liq = session.query(func.sum(BinanceLiquidation.quote_qty_usd)).filter(
+                BinanceLiquidation.timestamp >= liq_24h,
+                BinanceLiquidation.side == "BUY",
+            ).scalar() or 0
+
+        context["binance_metrics"] = {
+            "funding_rates_last_5": [
+                {"time": f.funding_time.isoformat(), "rate_pct": round(f.funding_rate * 100, 4)}
+                for f in fr
+            ],
+            "open_interest": oi_latest.open_interest if oi_latest else None,
+            "open_interest_change_24h_pct": oi_change_pct,
+            "top_trader_long_pct": top.long_pct if top else None,
+            "global_retail_long_pct": glob.long_pct if glob else None,
+            "retail_vs_smart_delta_pct": (
+                round((glob.long_pct - top.long_pct) * 100, 2)
+                if top and glob and top.long_pct is not None and glob.long_pct is not None
+                else None
+            ),
+            "taker_buysell_ratio": taker.long_short_ratio if taker else None,
+            "liquidations_24h": {
+                "longs_liquidated_usd": round(float(longs_liq), 0),
+                "shorts_liquidated_usd": round(float(shorts_liq), 0),
+                "dominant_side": (
+                    "longs" if longs_liq > shorts_liq * 1.5
+                    else "shorts" if shorts_liq > longs_liq * 1.5
+                    else "balanced"
+                ),
+            },
+        }
+    except Exception as exc:
+        logger.exception("binance metrics fetch failed")
+        context["binance_metrics"] = {"error": str(exc)}
+
+    # ---- Market microstructure: orderbook, whales, volume profile ----
+    try:
+        import requests
+        r = requests.get(
+            "https://fapi.binance.com/fapi/v1/depth",
+            params={"symbol": settings.binance_symbol or "CLUSDT", "limit": 100},
+            timeout=5,
+        )
+        raw = r.json()
+        bids = [(float(p), float(q)) for p, q in raw.get("bids", [])]
+        asks = [(float(p), float(q)) for p, q in raw.get("asks", [])]
+        bid_vol = sum(q for _, q in bids)
+        ask_vol = sum(q for _, q in asks)
+        mid = (bids[0][0] + asks[0][0]) / 2 if bids and asks else None
+        context["orderbook"] = {
+            "mid": mid,
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None,
+            "total_bid_volume": round(bid_vol, 1),
+            "total_ask_volume": round(ask_vol, 1),
+            "imbalance_pct": round(
+                (bid_vol - ask_vol) / (bid_vol + ask_vol) * 100, 2,
+            ) if (bid_vol + ask_vol) > 0 else 0.0,
+            "top_5_bids": [{"price": p, "qty": q} for p, q in bids[:5]],
+            "top_5_asks": [{"price": p, "qty": q} for p, q in asks[:5]],
+        }
+    except Exception as exc:
+        context["orderbook"] = {"error": str(exc)}
+
+    try:
+        import requests
+        r = requests.get(
+            "https://fapi.binance.com/fapi/v1/aggTrades",
+            params={"symbol": settings.binance_symbol or "CLUSDT", "limit": 1000},
+            timeout=8,
+        )
+        raw = r.json()
+        buy_usd = 0.0
+        sell_usd = 0.0
+        whale_count = 0
+        for row in raw:
+            try:
+                quote = float(row["p"]) * float(row["q"])
+                if quote < 10_000:
+                    continue
+                whale_count += 1
+                if row.get("m"):
+                    sell_usd += quote
+                else:
+                    buy_usd += quote
+            except (KeyError, ValueError, TypeError):
+                continue
+        context["whale_trades"] = {
+            "threshold_usd": 10_000,
+            "count": whale_count,
+            "buy_volume_usd": round(buy_usd, 0),
+            "sell_volume_usd": round(sell_usd, 0),
+            "delta_usd": round(buy_usd - sell_usd, 0),
+            "dominant_side": (
+                "BUY" if buy_usd > sell_usd * 1.2
+                else "SELL" if sell_usd > buy_usd * 1.2
+                else "BALANCED"
+            ),
+        }
+    except Exception as exc:
+        context["whale_trades"] = {"error": str(exc)}
+
+    # ---- Volume profile (POC / VAH / VAL) — inline compute from OHLCV ----
+    try:
+        from shared.models.base import SessionLocal
+        from shared.models.ohlcv import OHLCV
+        from sqlalchemy import desc
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        since = _dt.now(tz=_tz.utc) - _td(hours=24)
+        with SessionLocal() as session:
+            bars = (
+                session.query(OHLCV)
+                .filter(
+                    OHLCV.source == "binance",
+                    OHLCV.timeframe == "5min",
+                    OHLCV.timestamp >= since,
+                )
+                .order_by(OHLCV.timestamp.asc())
+                .all()
+            )
+        if bars:
+            typical = [(b.high + b.low + b.close) / 3 for b in bars]
+            vols = [b.volume or 0.0 for b in bars]
+            p_min, p_max = min(typical), max(typical)
+            if p_max > p_min:
+                n_buckets = 20
+                step = (p_max - p_min) / n_buckets
+                hist = [0.0] * n_buckets
+                for tp, v in zip(typical, vols):
+                    idx = min(n_buckets - 1, int((tp - p_min) / step))
+                    hist[idx] += v
+                poc_idx = max(range(n_buckets), key=lambda i: hist[i])
+                poc_price = p_min + step * (poc_idx + 0.5)
+                total = sum(hist)
+                target = total * 0.70
+                lo = hi = poc_idx
+                accum = hist[poc_idx]
+                while accum < target and (lo > 0 or hi < n_buckets - 1):
+                    left = hist[lo - 1] if lo > 0 else -1
+                    right = hist[hi + 1] if hi < n_buckets - 1 else -1
+                    if left >= right and lo > 0:
+                        lo -= 1; accum += hist[lo]
+                    elif hi < n_buckets - 1:
+                        hi += 1; accum += hist[hi]
+                    else:
+                        break
+                context["volume_profile"] = {
+                    "poc_price": round(poc_price, 3),
+                    "value_area_low": round(p_min + step * lo, 3),
+                    "value_area_high": round(p_min + step * (hi + 1), 3),
+                    "total_volume": round(total, 0),
+                    "price_min": round(p_min, 3),
+                    "price_max": round(p_max, 3),
+                }
+    except Exception as exc:
+        context["volume_profile_error"] = str(exc)
+
+    # ---- CVD (Cumulative Volume Delta) + divergence ----
+    try:
+        from plugin_cross_cvd import cvd_series, cross_asset_snapshot
+        cvd = cvd_series(minutes=120)
+        # Drop the full series to keep context small; keep key numbers
+        context["cvd"] = {
+            "symbol": cvd.get("symbol"),
+            "window_minutes": cvd.get("window_minutes"),
+            "current_cvd": cvd.get("current_cvd"),
+            "current_price": cvd.get("current_price"),
+            "divergence": cvd.get("divergence"),
+        }
+        context["cross_assets"] = cross_asset_snapshot(hours=24)
+    except Exception as exc:
+        context["cross_cvd_error"] = str(exc)
+
+    # ---- Scenario calculator + Monte Carlo risk probabilities ----
+    try:
+        from plugin_risk_tools import compute_scenarios, simulate_margin_call
+        context["scenarios"] = compute_scenarios()
+        context["monte_carlo_24h"] = simulate_margin_call(horizon_hours=24, n_paths=1500)
+    except Exception as exc:
+        context["risk_tools_error"] = str(exc)
+
+    # ---- Trade journal stats (user's own historical performance) ----
+    try:
+        from plugin_trade_journal import get_journal
+        journal = get_journal(limit=20)
+        context["trade_journal"] = {
+            "stats": journal.get("stats"),
+            "recent_trades": [
+                {
+                    "id": e["id"],
+                    "side": e["side"],
+                    "status": e["status"],
+                    "closed_at": e.get("closed_at"),
+                    "realized_pnl": e.get("realized_pnl"),
+                    "pnl_pct_of_entry_margin": e.get("pnl_pct_of_entry_margin"),
+                    "duration_minutes": e.get("duration_minutes"),
+                }
+                for e in (journal.get("entries") or [])[:10]
+            ],
+        }
+    except Exception as exc:
+        context["trade_journal"] = {"error": str(exc)}
+
+    # ---- Pattern match (forward-return distribution for similar moments) ----
+    try:
+        from plugin_learning import find_similar_moments, compute_signal_performance
+        context["pattern_match"] = find_similar_moments(top_n=5)
+        context["signal_performance"] = compute_signal_performance()
+    except Exception as exc:
+        context["learning_error"] = str(exc)
+
+    # ---- Active smart alerts (user-configured triggers) ----
+    try:
+        from plugin_smart_alerts import list_smart_alerts
+        context["smart_alerts"] = [
+            {
+                "id": a["id"],
+                "message": a["message"],
+                "status": a["status"],
+                "matches_now": a.get("matches_now"),
+                "trace": a.get("trace"),
+            }
+            for a in list_smart_alerts(status="active")
+        ]
+    except Exception as exc:
+        context["smart_alerts_error"] = str(exc)
 
     return context
 
@@ -435,9 +780,12 @@ def _validate_agent_output(parsed: dict, label: str, raw: str) -> dict:
 
 def _run_agent(system_prompt: str, context: dict, label: str) -> dict:
     """Run a single Sonnet agent with the given system prompt and context."""
+    # Context now contains a much richer snapshot — up to ~25kb of JSON. Most
+    # of it compresses well (repeated keys, floats). We cap at 30k chars and
+    # let the model see everything.
     user_prompt = (
-        f"## Market Context (authoritative — do not invent prices)\n"
-        f"{json.dumps(context, indent=2, default=str)[:12000]}\n\n"
+        f"## Full Dashboard Context (authoritative — do not invent numbers)\n"
+        f"{json.dumps(context, indent=2, default=str)[:30000]}\n\n"
         f"Build your {label} case now. Return ONLY the JSON object."
     )
 
@@ -445,7 +793,7 @@ def _run_agent(system_prompt: str, context: dict, label: str) -> dict:
     try:
         response = _get_client().messages.create(
             model=BULL_BEAR_MODEL,
-            max_tokens=1200,
+            max_tokens=1600,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -487,7 +835,7 @@ _BEAR_TEAM = [
 def _run_judge(context: dict, bull_team: dict[str, dict], bear_team: dict[str, dict]) -> dict:
     """Run the judge with all 6 cases + the original context."""
     user_prompt = (
-        f"## Market Context\n{json.dumps(context, indent=2, default=str)[:8000]}\n\n"
+        f"## Full Dashboard Context\n{json.dumps(context, indent=2, default=str)[:20000]}\n\n"
         f"## BULL TEAM CASES (3 specialists)\n{json.dumps(bull_team, indent=2)}\n\n"
         f"## BEAR TEAM CASES (3 specialists)\n{json.dumps(bear_team, indent=2)}\n\n"
         "Render your verdict now. Return ONLY the JSON object."
