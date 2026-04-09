@@ -15,6 +15,8 @@ import ConvictionMeter from "./components/ConvictionMeter";
 import SynthesisPanel from "./components/SynthesisPanel";
 import RiskToolsPanel from "./components/RiskToolsPanel";
 import CrossContextPanel from "./components/CrossContextPanel";
+import LearningPanel from "./components/LearningPanel";
+import LivePriceTicker from "./components/LivePriceTicker";
 
 // ---------------------------------------------------------------------------
 // Types matching the backend JSON
@@ -160,7 +162,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 p-4 md:p-6">
       {/* Header */}
-      <header className="mb-6 flex items-center justify-between">
+      <header className="mb-6 grid grid-cols-1 md:grid-cols-3 items-center gap-3">
         <div>
           <h1 className="text-xl font-bold text-white tracking-tight">
             WTI Crude Trading Dashboard
@@ -172,21 +174,28 @@ const App: React.FC = () => {
           </p>
         </div>
 
-        {/* WebSocket status pill */}
-        <span
-          className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
-            wsConnected
-              ? "bg-green-900 text-green-300"
-              : "bg-red-900 text-red-300"
-          }`}
-        >
+        {/* Live price ticker — center of header */}
+        <div className="flex justify-center">
+          <LivePriceTicker />
+        </div>
+
+        {/* WebSocket status pill — right side */}
+        <div className="flex justify-end">
           <span
-            className={`w-2 h-2 rounded-full ${
-              wsConnected ? "bg-green-400 animate-pulse" : "bg-red-400"
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
+              wsConnected
+                ? "bg-green-900 text-green-300"
+                : "bg-red-900 text-red-300"
             }`}
-          />
-          {wsConnected ? "Live" : "Disconnected"}
-        </span>
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                wsConnected ? "bg-green-400 animate-pulse" : "bg-red-400"
+              }`}
+            />
+            {wsConnected ? "Live" : "Disconnected"}
+          </span>
+        </div>
       </header>
 
       {/* Synthesis layer — Now Brief + Signal Confluence + Anomaly Radar */}
@@ -200,6 +209,9 @@ const App: React.FC = () => {
 
       {/* Cross-Asset + CVD flow */}
       <CrossContextPanel />
+
+      {/* Learning & Feedback Loop — journal, pattern match, smart alerts */}
+      <LearningPanel />
 
       {/* Conviction Meter — composite decision support (own row) */}
       <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-3">

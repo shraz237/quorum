@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Float, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from shared.models.base import Base
@@ -38,3 +39,12 @@ class Campaign(Base):
     take_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)  # set on close
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Trade journal snapshots — captured at open and close for feedback-loop
+    # analytics. Free-form JSONB so we can evolve the shape without migrations.
+    # Typical entry_snapshot keys: scores, conviction, funding, oi, orderbook,
+    # whale_delta, volume_profile, reason, current_price.
+    # Typical exit_snapshot keys: same plus max_favorable_excursion_usd,
+    # max_adverse_excursion_usd, duration_minutes, ai_review.
+    entry_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    exit_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

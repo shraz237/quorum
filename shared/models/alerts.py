@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from shared.models.base import Base
@@ -20,7 +21,7 @@ class Alert(Base):
         DateTime(timezone=True), nullable=False, index=True
     )
 
-    # price | keyword | score
+    # price | keyword | score | smart
     kind: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
 
     # active | triggered | cancelled
@@ -41,6 +42,18 @@ class Alert(Base):
     score_direction: Mapped[str | None] = mapped_column(
         String(8), nullable=True
     )  # "above"|"below"|"crosses"
+
+    # For kind=smart: a tree of conditions combined with AND/OR.
+    # Shape:
+    #   {"op": "AND", "clauses": [
+    #       {"metric": "funding_rate_pct", "cmp": "<=", "value": -0.03},
+    #       {"metric": "orderbook_imbalance_pct", "cmp": ">=", "value": 30},
+    #       {"op": "OR", "clauses": [
+    #           {"metric": "unified_score", "cmp": "<=", "value": -20},
+    #           {"metric": "retail_delta_pct", "cmp": ">=", "value": 15}
+    #       ]}
+    #   ]}
+    expression: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # Message the user wants attached to the alert
     message: Mapped[str | None] = mapped_column(Text, nullable=True)

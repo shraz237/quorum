@@ -332,6 +332,95 @@ def get_upcoming_events_endpoint(days: int = Query(default=7, ge=1, le=30)) -> d
         return {"error": str(exc)}
 
 
+from pydantic import BaseModel as _BaseModel
+
+class _SmartAlertIn(_BaseModel):
+    expression: dict
+    message: str | None = None
+    one_shot: bool = True
+
+
+@app.get("/api/smart-alerts")
+def list_smart_alerts_endpoint(status: str | None = Query(default=None)) -> dict[str, Any]:
+    try:
+        from plugin_smart_alerts import list_smart_alerts
+        return {"data": list_smart_alerts(status=status)}
+    except Exception as exc:
+        logger.exception("list smart alerts failed")
+        return {"error": str(exc)}
+
+
+@app.post("/api/smart-alerts")
+def create_smart_alert_endpoint(payload: _SmartAlertIn) -> dict[str, Any]:
+    try:
+        from plugin_smart_alerts import create_smart_alert
+        return {"data": create_smart_alert(
+            expression=payload.expression,
+            message=payload.message,
+            one_shot=payload.one_shot,
+        )}
+    except Exception as exc:
+        logger.exception("create smart alert failed")
+        return {"error": str(exc)}
+
+
+@app.delete("/api/smart-alerts/{alert_id}")
+def delete_smart_alert_endpoint(alert_id: int) -> dict[str, Any]:
+    try:
+        from plugin_smart_alerts import delete_smart_alert
+        return {"data": {"deleted": delete_smart_alert(alert_id)}}
+    except Exception as exc:
+        logger.exception("delete smart alert failed")
+        return {"error": str(exc)}
+
+
+@app.post("/api/smart-alerts/evaluate")
+def evaluate_smart_alerts_endpoint() -> dict[str, Any]:
+    """Manual trigger — evaluate all smart alerts right now."""
+    try:
+        from plugin_smart_alerts import evaluate_smart_alerts
+        return {"data": {"fired": evaluate_smart_alerts()}}
+    except Exception as exc:
+        logger.exception("evaluate smart alerts failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/pattern-match")
+def get_pattern_match_endpoint(top_n: int = Query(default=10, ge=1, le=50)) -> dict[str, Any]:
+    """Return historical snapshots most similar to current market state + their forward returns."""
+    try:
+        from plugin_learning import find_similar_moments
+        return {"data": find_similar_moments(top_n=top_n)}
+    except Exception as exc:
+        logger.exception("pattern match failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/signal-performance")
+def get_signal_performance_endpoint() -> dict[str, Any]:
+    """Return per-feature bucket forward-return statistics."""
+    try:
+        from plugin_learning import compute_signal_performance
+        return {"data": compute_signal_performance()}
+    except Exception as exc:
+        logger.exception("signal performance failed")
+        return {"error": str(exc)}
+
+
+@app.get("/api/trade-journal")
+def get_trade_journal_endpoint(
+    limit: int = Query(default=50, ge=1, le=500),
+    include_open: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Return closed campaigns with snapshots + aggregate performance stats."""
+    try:
+        from plugin_trade_journal import get_journal
+        return {"data": get_journal(limit=limit, include_open=include_open)}
+    except Exception as exc:
+        logger.exception("trade journal failed")
+        return {"error": str(exc)}
+
+
 @app.get("/api/cross-assets")
 def get_cross_assets_endpoint(hours: int = Query(default=24, ge=1, le=168)) -> dict[str, Any]:
     """Return latest values / 1h / 24h change / correlation for DXY/SPX/Gold/BTC/VIX."""
@@ -773,6 +862,13 @@ def close_campaign_endpoint(campaign_id: int) -> dict[str, Any]:
     snap = close_campaign(campaign_id, status="closed_manual", notes="Closed via dashboard")
     if snap is None:
         return {"error": "campaign not found or could not be closed (no price?)"}
+
+    # Capture an exit snapshot for the trade journal (best-effort).
+    try:
+        from plugin_trade_journal import attach_exit_snapshot
+        attach_exit_snapshot(campaign_id, reason="manual_close_dashboard")
+    except Exception:
+        logger.exception("attach_exit_snapshot failed")
 
     try:
         from shared.redis_streams import publish
@@ -1221,6 +1317,13 @@ async def websocket_logs(ws: WebSocket) -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     logger.info("Dashboard backend starting — DB URL: %s", settings.postgres_url)
+    # Launch the learning worker: every 5 min capture a signal snapshot and
+    # backfill any forward returns whose horizon has elapsed.
+    try:
+        from plugin_learning import start_learning_worker
+        start_learning_worker()
+    except Exception:
+        logger.exception("Failed to start learning worker")
 
 
 # ---------------------------------------------------------------------------

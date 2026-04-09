@@ -598,6 +598,13 @@ def _close_campaign(campaign_id: int, reason: str) -> dict:
     if snap is None:
         return {"error": f"campaign {campaign_id} not found or already closed"}
 
+    # Capture exit snapshot for trade journal
+    try:
+        from plugin_trade_journal import attach_exit_snapshot
+        attach_exit_snapshot(campaign_id, reason=f"chat: {reason}")
+    except Exception:
+        pass
+
     # Notify Telegram via the position event stream
     try:
         payload = {
@@ -670,6 +677,13 @@ def _open_new_campaign(side: str, reason: str) -> dict:
     campaign_id = pm_open_campaign(side=side_upper, current_price=price)
     if campaign_id is None:
         return {"error": "failed to open campaign — check free_margin"}
+
+    # Capture entry snapshot for trade journal
+    try:
+        from plugin_trade_journal import attach_entry_snapshot
+        attach_entry_snapshot(campaign_id, reason=f"chat: {reason}")
+    except Exception:
+        pass
 
     try:
         publish(

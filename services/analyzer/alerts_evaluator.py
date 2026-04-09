@@ -176,6 +176,28 @@ def _evaluate_once() -> None:
             logger.exception("Error evaluating alert %s", alert.id)
 
 
+def _evaluate_smart_once() -> None:
+    """Evaluate smart confluence alerts (dashboard-side plugin).
+
+    Imported lazily so the analyzer service doesn't hard-depend on dashboard
+    code. If the dashboard plugin isn't importable (e.g. circular), we skip
+    silently.
+    """
+    try:
+        # Dashboard plugins live under /app in the dashboard container only.
+        # In the analyzer container this import will typically fail — that's
+        # OK, smart alerts run inside the dashboard process instead.
+        import sys
+        if "/app" not in sys.path:
+            sys.path.insert(0, "/app")
+        from plugin_smart_alerts import evaluate_smart_alerts  # type: ignore
+        evaluate_smart_alerts()
+    except ImportError:
+        pass
+    except Exception:
+        logger.exception("smart alerts evaluation failed")
+
+
 def run_evaluator_loop() -> None:
     """Main loop — runs forever in a daemon thread."""
     logger.info(
@@ -184,6 +206,7 @@ def run_evaluator_loop() -> None:
     while True:
         try:
             _evaluate_once()
+            _evaluate_smart_once()
         except Exception:
             logger.exception("Alert evaluator iteration failed")
         time.sleep(POLL_INTERVAL_SECONDS)
