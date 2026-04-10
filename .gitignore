@@ -57,3 +57,6 @@ dumps/
 # Internal plan scratchpads (if regenerated locally)
 docs/internal/
 docs/superpowers/
+
+# Private docs — never push to public repo
+README_PL.md
