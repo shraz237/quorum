@@ -883,6 +883,16 @@ def get_scalp_brain(force: bool = False) -> dict:
     except Exception:
         logger.exception("scalp_brain: autopropose failed")
 
+    # Auto-execute: the scalper persona opens/closes mini-campaigns
+    # on its own $50k account when the verdict is NOW.
+    try:
+        from plugin_scalper_executor import maybe_execute
+        scalper_action = maybe_execute(result)
+        if scalper_action is not None:
+            result["scalper_action"] = scalper_action
+    except Exception:
+        logger.exception("scalp_brain: scalper executor failed")
+
     return {**result, "cache_age_seconds": 0.0}
 
 

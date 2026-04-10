@@ -28,6 +28,9 @@ class Campaign(Base):
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Which persona owns this campaign — 'main' or 'scalper'
+    persona: Mapped[str] = mapped_column(String(16), nullable=False, default="main", index=True)
+
     # LONG | SHORT
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     # open | closed_tp | closed_sl | closed_manual | closed_strategy | closed_hard_stop

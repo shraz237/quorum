@@ -205,9 +205,10 @@ _POSITION_EVENT_TITLES = {
     # Scalp brain — ultimate scalper verdict transitions
     "scalp_brain_alert":     ("\u26a1",     "Scalp Brain"),                  # lightning
     # Thesis lifecycle — ALL thesis events silenced on Telegram.
-    # Theses are for learning data only (dashboard Theses tab). The user
-    # explicitly said they make noise and spam the feed.
     # thesis_created, thesis_triggered, thesis_resolved — all absent.
+    # Scalper persona auto-trade events
+    "scalper_opened":        ("\U0001f3af", "Scalper OPENED"),               # target
+    "scalper_closed":        ("\U0001f3af", "Scalper CLOSED"),               # target
 }
 
 
@@ -727,6 +728,12 @@ def format_position_event(evt: dict) -> str | None:
     # ALL thesis events (created, triggered, resolved) are intentionally
     # dropped at the _POSITION_EVENT_TITLES guard above — they're for
     # learning data only (dashboard Theses tab). No Telegram noise.
+
+    # Scalper persona events — add persona tag to the standard rendering
+    if kind in ("scalper_opened", "scalper_closed"):
+        persona = evt.get("persona") or "scalper"
+        # Fall through to the standard rendering below, but note the
+        # persona tag is already in the title from _POSITION_EVENT_TITLES
 
     icon, title = _POSITION_EVENT_TITLES[kind]
     title = f"{_test_prefix(evt)}{title}"

@@ -272,10 +272,12 @@ def get_positions(status: str | None = Query(default=None)) -> dict[str, Any]:
 
 
 @app.get("/api/account")
-def get_account_endpoint() -> dict[str, Any]:
-    """Return current account state (cash, equity, margin, PnL)."""
+def get_account_endpoint(
+    persona: str = Query(default="main", description="main | scalper"),
+) -> dict[str, Any]:
+    """Return current account state for a specific persona."""
     try:
-        return {"data": recompute_account_state()}
+        return {"data": recompute_account_state(persona=persona)}
     except Exception as exc:
         logger.exception("get_account_endpoint failed")
         return {"error": str(exc)}

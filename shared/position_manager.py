@@ -193,9 +193,11 @@ def close_position(
     close_price: float,
     status: str,
     notes: str | None = None,
+    persona: str = "main",
 ) -> dict | None:
     """Close a position and return the closed-row snapshot.
 
+    Routes realized P/L to the specified persona's account.
     Applies realistic trading friction:
       - Spread + slippage on the close price (adverse fill)
       - Swap fees based on number of nights held
@@ -313,11 +315,11 @@ def close_position(
             "campaign_id": row.campaign_id,
         }
 
-    # Return margin + NET pnl to the account
+    # Return margin + NET pnl to the persona's account
     try:
-        apply_position_close(margin, net_pnl)
+        apply_position_close(margin, net_pnl, persona=persona)
     except Exception:
-        logger.exception("apply_position_close failed for position #%s", position_id)
+        logger.exception("apply_position_close failed for position #%s (persona=%s)", position_id, persona)
 
     return snap
 
@@ -463,28 +465,28 @@ def compute_campaign_state(campaign_id: int, current_price: float | None = None)
         }
 
 
-def list_open_campaigns() -> list[dict]:
-    """Return all open campaigns with computed fields."""
+def list_open_campaigns(persona: str | None = None) -> list[dict]:
+    """Return all open campaigns with computed fields, optionally filtered by persona."""
     current_price = get_current_price()
 
     with SessionLocal() as session:
-        campaigns = (
-            session.query(Campaign)
-            .filter(Campaign.status == "open")
-            .order_by(Campaign.opened_at)
-            .all()
-        )
+        q = session.query(Campaign).filter(Campaign.status == "open")
+        if persona is not None:
+            q = q.filter(Campaign.persona == persona)
+        campaigns = q.order_by(Campaign.opened_at).all()
         ids = [c.id for c in campaigns]
 
     return [compute_campaign_state(cid, current_price) for cid in ids if cid is not None]
 
 
-def list_campaigns(status: str | None = None, limit: int = 50) -> list[dict]:
-    """Return campaigns filtered by status (or all if status is None)."""
+def list_campaigns(status: str | None = None, limit: int = 50, persona: str | None = None) -> list[dict]:
+    """Return campaigns filtered by status and/or persona."""
     current_price = get_current_price()
 
     with SessionLocal() as session:
         q = session.query(Campaign).order_by(Campaign.opened_at.desc())
+        if persona is not None:
+            q = q.filter(Campaign.persona == persona)
         if status and status != "all":
             if status == "open":
                 q = q.filter(Campaign.status == "open")
@@ -635,6 +637,7 @@ def open_new_campaign(
     llm_confidence: float | None = None,
     take_profit: float | None = None,
     stop_loss: float | None = None,
+    persona: str = "main",
 ) -> int | None:
     """Create a Campaign row and open the first DCA layer (layer 0).
 
@@ -708,6 +711,7 @@ def open_new_campaign(
     with SessionLocal() as session:
         campaign = Campaign(
             opened_at=now,
+            persona=persona,
             side=side_norm,
             status="open",
             max_loss_pct=HARD_STOP_DRAWDOWN_PCT,
@@ -824,6 +828,7 @@ def add_dca_layer(campaign_id: int, current_price: float) -> int | None:
 def close_campaign(campaign_id: int, status: str, notes: str | None = None) -> dict | None:
     """Close all open positions in the campaign and mark it closed.
 
+    Routes realized P/L to the campaign's persona account (main or scalper).
     Returns the aggregate snapshot matching the campaign API shape.
     """
     current_price = get_current_price()
@@ -835,6 +840,7 @@ def close_campaign(campaign_id: int, status: str, notes: str | None = None) -> d
         campaign = session.query(Campaign).filter(Campaign.id == campaign_id).first()
         if campaign is None:
             return None
+        campaign_persona = campaign.persona or "main"
 
         open_pos = (
             session.query(Position)
@@ -851,6 +857,7 @@ def close_campaign(campaign_id: int, status: str, notes: str | None = None) -> d
             close_price=current_price,
             status=status,
             notes=notes or f"Campaign closed: {status}",
+            persona=campaign_persona,
         )
         if snap:
             total_pnl += snap.get("realised_pnl") or 0.0
