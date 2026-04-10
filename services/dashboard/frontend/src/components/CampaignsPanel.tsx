@@ -527,11 +527,17 @@ const CampaignCard: React.FC<CampaignCardProps> = ({ campaign, onRefetch }) => {
 // CampaignsPanel
 // ---------------------------------------------------------------------------
 
-const CampaignsPanel: React.FC = () => {
-  const { data, loading, error, refetch } = useApi<Campaign[]>(
-    "/api/campaigns?status=open",
-    { pollInterval: 5_000 }
-  );
+interface CampaignsPanelProps {
+  persona?: string;
+}
+
+const CampaignsPanel: React.FC<CampaignsPanelProps> = ({ persona }) => {
+  const url = persona
+    ? `/api/campaigns?status=open&persona=${persona}`
+    : "/api/campaigns?status=open";
+  const { data, loading, error, refetch } = useApi<Campaign[]>(url, {
+    pollInterval: 5_000,
+  });
 
   return (
     <section className="mb-6">

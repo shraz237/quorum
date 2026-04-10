@@ -439,6 +439,7 @@ def compute_campaign_state(campaign_id: int, current_price: float | None = None)
 
         return {
             "id": campaign.id,
+            "persona": campaign.persona or "main",
             "side": campaign.side,
             "status": campaign.status,
             "opened_at": campaign.opened_at.isoformat() if campaign.opened_at else None,

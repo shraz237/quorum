@@ -1,33 +1,57 @@
 /**
- * AccountOneLiner — compact version of AccountPanel for the cockpit bar.
+ * AccountOneLiner — compact dual-persona view for the cockpit bar.
  *
- * Shows: equity + open P&L. Click jumps to Positions tab for full breakdown.
+ * Shows both Main and Scalper equity + P/L in one row so the user
+ * sees both traders' performance at a glance.
  */
 
 import React from "react";
 import useApi from "../hooks/useApi";
 
 interface Account {
-  starting_balance: number;
-  cash: number;
+  persona: string;
   equity: number;
-  margin_used: number;
-  free_margin: number;
-  margin_level_pct: number | null;
-  realized_pnl_total: number;
   unrealised_pnl: number;
   account_drawdown_pct: number;
   open_campaigns: number;
+  free_margin: number;
 }
 
 interface Props {
   onClick?: () => void;
 }
 
-const AccountOneLiner: React.FC<Props> = ({ onClick }) => {
-  const { data } = useApi<Account>("/api/account", { pollInterval: 5_000 });
+const MiniAccount: React.FC<{ label: string; data: Account; color: string }> = ({
+  label,
+  data,
+  color,
+}) => {
+  const pnl = data.unrealised_pnl;
+  const pnlColor = pnl >= 0 ? "text-emerald-300" : "text-red-300";
+  const pnlSign = pnl >= 0 ? "+" : "";
 
-  if (!data) {
+  return (
+    <span className="flex items-center gap-1">
+      <span className={`text-[8px] uppercase tracking-wider ${color}`}>{label}</span>
+      <span className="font-bold tabular-nums text-gray-100 text-[11px]">
+        ${(data.equity / 1000).toFixed(1)}k
+      </span>
+      <span className={`tabular-nums text-[10px] ${pnlColor}`}>
+        {pnlSign}${Math.round(pnl)}
+      </span>
+    </span>
+  );
+};
+
+const AccountOneLiner: React.FC<Props> = ({ onClick }) => {
+  const { data: main } = useApi<Account>("/api/account?persona=main", {
+    pollInterval: 5_000,
+  });
+  const { data: scalper } = useApi<Account>("/api/account?persona=scalper", {
+    pollInterval: 5_000,
+  });
+
+  if (!main && !scalper) {
     return (
       <div className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs bg-gray-800 text-gray-500 animate-pulse">
         <span>Account …</span>
@@ -35,37 +59,22 @@ const AccountOneLiner: React.FC<Props> = ({ onClick }) => {
     );
   }
 
-  const pnl = data.unrealised_pnl;
-  const pnlPositive = pnl >= 0;
-  const pnlColor = pnlPositive ? "text-emerald-300" : "text-red-300";
-  const pnlSign = pnlPositive ? "+" : "";
-
-  // Drawdown warning color: red if we're deep
-  const dd = data.account_drawdown_pct;
-  const ddColor =
-    dd <= -30 ? "text-red-400"
-    : dd <= -15 ? "text-amber-400"
-    : "text-gray-400";
+  const mainTitle = main
+    ? `Main: eq $${main.equity.toFixed(0)} · dd ${main.account_drawdown_pct.toFixed(1)}% · ${main.open_campaigns} open`
+    : "";
+  const scalperTitle = scalper
+    ? `Scalper: eq $${scalper.equity.toFixed(0)} · dd ${scalper.account_drawdown_pct.toFixed(1)}% · ${scalper.open_campaigns} open`
+    : "";
 
   return (
     <button
       onClick={onClick}
       className="flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium bg-gray-800/80 hover:bg-gray-700 transition"
-      title={`Equity $${data.equity.toFixed(0)} · Free margin $${data.free_margin.toFixed(0)} · Drawdown ${dd.toFixed(1)}% · ${data.open_campaigns} open. Click for full breakdown.`}
+      title={`${mainTitle}\n${scalperTitle}`}
     >
-      <span className="uppercase tracking-wider text-[9px] text-gray-500">Eq</span>
-      <span className="font-bold tabular-nums text-gray-100">
-        ${(data.equity / 1000).toFixed(1)}k
-      </span>
-      <span className="text-gray-700">·</span>
-      <span className="uppercase tracking-wider text-[9px] text-gray-500">P/L</span>
-      <span className={`font-bold tabular-nums ${pnlColor}`}>
-        {pnlSign}${Math.round(pnl)}
-      </span>
-      <span className="text-gray-700">·</span>
-      <span className={`text-[10px] tabular-nums ${ddColor}`}>
-        {dd >= 0 ? "+" : ""}{dd.toFixed(1)}%
-      </span>
+      {main && <MiniAccount label="M" data={main} color="text-blue-400" />}
+      {main && scalper && <span className="text-gray-700 text-[9px]">|</span>}
+      {scalper && <MiniAccount label="S" data={scalper} color="text-amber-400" />}
     </button>
   );
 };

@@ -1116,10 +1116,11 @@ def resume_heartbeat_endpoint() -> dict[str, Any]:
 def get_campaigns_endpoint(
     status: str | None = Query(default="open"),
     limit: int = Query(default=50, ge=1, le=200),
+    persona: str | None = Query(default=None, description="main | scalper | None = all"),
 ) -> dict[str, Any]:
-    """Return campaigns filtered by status."""
+    """Return campaigns filtered by status and/or persona."""
     try:
-        camps = list_campaigns(status=status, limit=limit)
+        camps = list_campaigns(status=status, limit=limit, persona=persona)
         return {"data": camps}
     except Exception as exc:
         logger.exception("get_campaigns_endpoint failed")
