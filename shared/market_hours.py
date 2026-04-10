@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 # 1. Twelve Data feed often stops updating before the official close
 # 2. Last-hour liquidity is thin, spreads widen, signals degrade
 # 3. No point running Opus on dying volume
-WEEKEND_CLOSE_HOUR_UTC = 21  # Friday 21:00 UTC (11pm Poland, 4pm CT)
+WEEKEND_CLOSE_HOUR_UTC = 20  # Friday 20:00 UTC (10pm Poland, 3pm CT)
 WEEKEND_OPEN_HOUR_UTC = 22   # Sunday 22:00 UTC (midnight Poland)
 
 
