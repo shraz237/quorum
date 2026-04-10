@@ -126,24 +126,44 @@ def open_position(
 ) -> int | None:
     """Insert a new open Position and return its id.
 
+    Applies realistic trading friction (spread + slippage) to the entry
+    price so the paper book reflects what a real broker fill would look
+    like. The mid_price (the "screen price") is stored in notes for
+    audit; the Position row gets the effective (worse) entry.
+
     If margin_used is provided, also calls account_manager.apply_position_open().
     """
     from shared.account_manager import apply_position_open
+    from shared.trading_friction import apply_entry_friction, compute_commission
 
     side_norm = side.upper()
     if side_norm not in ("LONG", "SHORT"):
         return None
+
+    # Apply spread + slippage to degrade the entry
+    effective_entry, friction_detail = apply_entry_friction(side_norm, entry_price)
+
+    # Commission on open side
+    open_commission, comm_detail = compute_commission(lots or 0.0)
+
+    friction_note = (
+        f"[friction] mid=${entry_price:.3f} → entry=${effective_entry:.3f} "
+        f"(spread=${friction_detail['spread_half']:.3f}, slip=${friction_detail['slippage']:.4f})"
+    )
+    if open_commission > 0:
+        friction_note += f" comm=${open_commission:.2f}"
+    full_notes = f"{notes}\n{friction_note}" if notes else friction_note
 
     with SessionLocal() as session:
         row = Position(
             opened_at=datetime.now(tz=timezone.utc),
             side=side_norm,
             status="open",
-            entry_price=entry_price,
+            entry_price=effective_entry,
             stop_loss=stop_loss,
             take_profit=take_profit,
             recommendation_id=recommendation_id,
-            notes=notes,
+            notes=full_notes,
             campaign_id=campaign_id,
             lots=lots,
             margin_used=margin_used,
@@ -154,8 +174,8 @@ def open_position(
         session.commit()
         session.refresh(row)
         logger.info(
-            "Opened position #%s %s @ %.2f lots=%s margin=%s layer=%s campaign=%s",
-            row.id, side_norm, entry_price, lots, margin_used, layer_index, campaign_id,
+            "Opened position #%s %s @ %.3f (mid %.3f) lots=%s margin=%s layer=%s campaign=%s",
+            row.id, side_norm, effective_entry, entry_price, lots, margin_used, layer_index, campaign_id,
         )
 
     # Reserve margin in the account (outside the position session to avoid deadlock)
@@ -176,11 +196,21 @@ def close_position(
 ) -> dict | None:
     """Close a position and return the closed-row snapshot.
 
-    PnL is computed in USD = (close - entry) * lots * 100, signed by side.
-    Falls back to simple point move for legacy positions without lots.
+    Applies realistic trading friction:
+      - Spread + slippage on the close price (adverse fill)
+      - Swap fees based on number of nights held
+      - Currency conversion costs
+      - Commission on the close side
+
+    PnL = gross price move × lots × 100 − total friction costs.
     Also calls account_manager.apply_position_close().
     """
     from shared.account_manager import apply_position_close
+    from shared.trading_friction import (
+        apply_exit_friction,
+        compute_commission,
+        compute_holding_costs,
+    )
 
     with SessionLocal() as session:
         row = session.execute(
@@ -194,47 +224,98 @@ def close_position(
         lots = row.lots
         margin = row.margin_used or 0.0
 
+        # Apply spread + slippage to degrade the close price
+        effective_close, exit_friction = apply_exit_friction(row.side, close_price)
+
+        # Gross P&L at the effective close
         if lots is not None:
-            # Full dollar P&L
             if row.side == "LONG":
-                pnl = (close_price - row.entry_price) * lots * 100
+                gross_pnl = (effective_close - row.entry_price) * lots * 100
             else:
-                pnl = (row.entry_price - close_price) * lots * 100
+                gross_pnl = (row.entry_price - effective_close) * lots * 100
         else:
-            # Legacy fallback — simple point move (not dollar-accurate)
             if row.side == "LONG":
-                pnl = close_price - row.entry_price
+                gross_pnl = effective_close - row.entry_price
             else:
-                pnl = row.entry_price - close_price
+                gross_pnl = row.entry_price - effective_close
+
+        # Holding costs (swap + currency conversion)
+        holding_cost = 0.0
+        holding_detail: dict = {}
+        if lots is not None and row.opened_at is not None:
+            closed_at = datetime.now(tz=timezone.utc)
+            holding_cost, holding_detail = compute_holding_costs(
+                side=row.side,
+                lots=lots,
+                margin_used=margin,
+                opened_at=row.opened_at,
+                closed_at=closed_at,
+            )
+
+        # Commission on close side
+        close_commission, comm_detail = compute_commission(lots or 0.0)
+
+        # Net P&L = gross − all friction costs
+        total_friction = holding_cost + close_commission
+        net_pnl = gross_pnl - total_friction
+
+        # Build friction note for the trade journal
+        friction_note = (
+            f"[friction] mid=${close_price:.3f} → close=${effective_close:.3f} "
+            f"(spread=${exit_friction['spread_half']:.3f}, slip=${exit_friction['slippage']:.4f})"
+        )
+        if holding_cost > 0:
+            friction_note += (
+                f" | swap={holding_detail.get('nights_held', 0)} nights × "
+                f"${holding_detail.get('swap_per_lot_per_night', 0)}/lot = ${holding_detail.get('swap_cost_usd', 0):.2f}"
+            )
+        if holding_detail.get("conversion_cost_usd", 0) > 0:
+            friction_note += f" | fx=${holding_detail['conversion_cost_usd']:.2f}"
+        if close_commission > 0:
+            friction_note += f" | comm=${close_commission:.2f}"
+        friction_note += f" | gross=${gross_pnl:+.2f} net=${net_pnl:+.2f} friction_total=${total_friction:.2f}"
+
+        full_notes = notes or ""
+        full_notes = f"{full_notes}\n{friction_note}" if full_notes else friction_note
 
         row.status = status
-        row.close_price = close_price
+        row.close_price = effective_close
         row.closed_at = datetime.now(tz=timezone.utc)
-        row.realised_pnl = pnl
-        if notes:
-            row.notes = (row.notes + "\n" if row.notes else "") + notes
+        row.realised_pnl = net_pnl
+        if full_notes:
+            row.notes = (row.notes + "\n" if row.notes else "") + full_notes
         session.commit()
 
         logger.info(
-            "Closed position #%s %s status=%s pnl=%+.2f margin=%.2f",
-            row.id, row.side, status, pnl, margin,
+            "Closed position #%s %s status=%s gross=%+.2f net=%+.2f friction=%.2f (swap=%.2f fx=%.2f comm=%.2f)",
+            row.id, row.side, status, gross_pnl, net_pnl,
+            total_friction, holding_detail.get("swap_cost_usd", 0),
+            holding_detail.get("conversion_cost_usd", 0), close_commission,
         )
         snap = {
             "id": row.id,
             "side": row.side,
             "status": status,
             "entry_price": row.entry_price,
-            "close_price": close_price,
-            "realised_pnl": pnl,
+            "close_price": effective_close,
+            "mid_close_price": close_price,
+            "realised_pnl": net_pnl,
+            "gross_pnl": gross_pnl,
+            "friction_costs": {
+                "spread_slippage": exit_friction,
+                "holding": holding_detail,
+                "commission": comm_detail,
+                "total_friction_usd": round(total_friction, 2),
+            },
             "lots": lots,
             "margin_used": margin,
             "layer_index": row.layer_index,
             "campaign_id": row.campaign_id,
         }
 
-    # Return margin + pnl to the account
+    # Return margin + NET pnl to the account
     try:
-        apply_position_close(margin, pnl)
+        apply_position_close(margin, net_pnl)
     except Exception:
         logger.exception("apply_position_close failed for position #%s", position_id)
 
@@ -288,13 +369,22 @@ def compute_campaign_state(campaign_id: int, current_price: float | None = None)
         else:
             avg_entry = None
 
-        # Unrealised PnL
+        # Unrealised PnL — includes estimated exit friction (spread + slippage)
+        # so the displayed number reflects what you'd actually get if you
+        # closed RIGHT NOW. Without this, the dashboard looks rosier than
+        # reality because it assumes a mid-price exit.
         unrealised_pnl = 0.0
         if current_price is not None and total_lots > 0:
+            from shared.trading_friction import SPREAD_HALF_USD
+            # Estimate the effective close price (mid - half_spread for LONG,
+            # mid + half_spread for SHORT) — we skip slippage in the estimate
+            # since it's random and we want a stable display number.
             if campaign.side == "LONG":
-                unrealised_pnl = (current_price - avg_entry) * total_lots * 100
+                est_close = current_price - SPREAD_HALF_USD
+                unrealised_pnl = (est_close - avg_entry) * total_lots * 100
             else:
-                unrealised_pnl = (avg_entry - current_price) * total_lots * 100
+                est_close = current_price + SPREAD_HALF_USD
+                unrealised_pnl = (avg_entry - est_close) * total_lots * 100
 
         # Unrealised PnL as % of total margin
         if total_margin > 0:
