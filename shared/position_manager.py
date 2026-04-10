@@ -876,7 +876,25 @@ def close_campaign(campaign_id: int, status: str, notes: str | None = None) -> d
     # snapshot must not break the close.
     try:
         from shared.trade_snapshot import attach_exit_snapshot
-        attach_exit_snapshot(campaign_id, reason=f"{status}:{notes or ''}"[:120])
+        # Collect friction details from all closed positions for the journal
+        total_friction = sum(
+            (s.get("friction_costs") or {}).get("total_friction_usd", 0)
+            for s in closed_snaps
+        )
+        attach_exit_snapshot(
+            campaign_id,
+            reason=f"{status}:{notes or ''}"[:120],
+            extra={
+                "close_trigger": status,
+                "close_notes": notes,
+                "total_realized_pnl": round(total_pnl, 2),
+                "positions_closed": len(closed_snaps),
+                "total_friction_usd": round(total_friction, 2),
+                "per_position_friction": [
+                    s.get("friction_costs") for s in closed_snaps if s.get("friction_costs")
+                ],
+            },
+        )
     except Exception:
         logger.exception("exit snapshot failed for campaign #%s", campaign_id)
 

@@ -132,13 +132,126 @@ def build_snapshot(reason: str | None = None) -> dict:
             "taker_buysell_ratio": taker.long_short_ratio if taker else None,
         }
 
+    # --- REASONING LAYER ---
+    # Captures WHY the trade was opened/closed so the user can review
+    # the bot's thinking on every trade for learning purposes.
+
+    # Latest AI recommendation (Opus reasoning + levels)
+    try:
+        from shared.models.signals import AIRecommendation
+        with SessionLocal() as session:
+            rec = _safe_latest(session, AIRecommendation, AIRecommendation.timestamp)
+            if rec:
+                snap["ai_recommendation"] = {
+                    "action": rec.action,
+                    "confidence": rec.confidence,
+                    "unified_score": rec.unified_score,
+                    "opus_override_score": rec.opus_override_score,
+                    "analysis_text": (rec.analysis_text or "")[:2000],
+                    "base_scenario": (rec.base_scenario or "")[:500],
+                    "alt_scenario": (rec.alt_scenario or "")[:500],
+                    "risk_factors": rec.risk_factors,
+                    "entry_price": rec.entry_price,
+                    "stop_loss": rec.stop_loss,
+                    "take_profit": rec.take_profit,
+                    "timestamp": rec.timestamp.isoformat() if rec.timestamp else None,
+                }
+    except Exception:
+        logger.exception("trade_snapshot: AI recommendation capture failed")
+
+    # Latest heartbeat decision + reasoning (what Opus was thinking)
+    try:
+        from shared.models.heartbeat_runs import HeartbeatRun
+        with SessionLocal() as session:
+            hb = _safe_latest(session, HeartbeatRun, HeartbeatRun.ran_at)
+            if hb:
+                snap["last_heartbeat"] = {
+                    "decision": hb.decision,
+                    "reason": (hb.reason or "")[:1000],
+                    "ran_at": hb.ran_at.isoformat() if hb.ran_at else None,
+                    "campaign_id": hb.campaign_id,
+                    "executed": hb.executed,
+                }
+    except Exception:
+        logger.exception("trade_snapshot: heartbeat capture failed")
+
+    # Recent marketfeed headlines (last 3 digests — what the news was)
+    try:
+        from shared.models.knowledge import KnowledgeSummary
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+        with SessionLocal() as session:
+            news_rows = (
+                session.query(KnowledgeSummary)
+                .filter(KnowledgeSummary.timestamp >= cutoff)
+                .order_by(desc(KnowledgeSummary.timestamp))
+                .limit(3)
+                .all()
+            )
+            if news_rows:
+                snap["recent_news"] = [
+                    {
+                        "ts": r.timestamp.isoformat(),
+                        "summary": (r.summary or "")[:400],
+                        "sentiment": r.sentiment_label,
+                        "score": r.sentiment_score,
+                    }
+                    for r in news_rows
+                ]
+    except Exception:
+        logger.exception("trade_snapshot: news capture failed")
+
+    # Pending theses at the time of the trade
+    try:
+        from shared.models.theses import Thesis
+        with SessionLocal() as session:
+            pending = (
+                session.query(Thesis)
+                .filter(Thesis.status == "pending")
+                .filter(~Thesis.created_by.like("smoke%"))
+                .order_by(desc(Thesis.created_at))
+                .limit(10)
+                .all()
+            )
+            if pending:
+                snap["pending_theses"] = [
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "trigger_type": t.trigger_type,
+                        "trigger_params": t.trigger_params,
+                        "planned_action": t.planned_action,
+                    }
+                    for t in pending
+                ]
+    except Exception:
+        logger.exception("trade_snapshot: theses capture failed")
+
+    # Friction config at the time of trade (so journal entries show the
+    # spread/slippage/swap assumptions that were in effect)
+    try:
+        from shared.trading_friction import friction_summary
+        snap["friction_config"] = friction_summary()
+    except Exception:
+        logger.exception("trade_snapshot: friction capture failed")
+
     return snap
 
 
-def attach_entry_snapshot(campaign_id: int, reason: str | None = None) -> None:
-    """Build and store an entry snapshot on a newly-opened campaign."""
+def attach_entry_snapshot(
+    campaign_id: int,
+    reason: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Build and store an entry snapshot on a newly-opened campaign.
+
+    `extra` can carry caller-specific context (e.g. the score event that
+    triggered the open, or the chat message that asked for it). It's
+    merged into the snapshot so the trade journal shows the full story.
+    """
     from shared.models.campaigns import Campaign
     snap = build_snapshot(reason=reason or "campaign_open")
+    if extra and isinstance(extra, dict):
+        snap["entry_context"] = extra
     try:
         with SessionLocal() as session:
             row = session.query(Campaign).filter(Campaign.id == campaign_id).first()
@@ -150,10 +263,52 @@ def attach_entry_snapshot(campaign_id: int, reason: str | None = None) -> None:
         logger.exception("attach_entry_snapshot failed for campaign %s", campaign_id)
 
 
-def attach_exit_snapshot(campaign_id: int, reason: str | None = None) -> None:
-    """Build and store an exit snapshot on a closed campaign."""
+def attach_exit_snapshot(
+    campaign_id: int,
+    reason: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Build and store an exit snapshot on a closed campaign.
+
+    `extra` can carry close-specific context (friction costs breakdown,
+    the heartbeat reason that triggered the close, etc.). Merged into
+    the snapshot for full journal audit trail.
+    """
     from shared.models.campaigns import Campaign
     snap = build_snapshot(reason=reason or "campaign_close")
+    if extra and isinstance(extra, dict):
+        snap["exit_context"] = extra
+
+    # Also compute max favorable/adverse excursion over the campaign's life
+    try:
+        with SessionLocal() as session:
+            row = session.query(Campaign).filter(Campaign.id == campaign_id).first()
+            if row is not None and row.opened_at is not None:
+                from shared.models.ohlcv import OHLCV
+                bars = (
+                    session.query(OHLCV)
+                    .filter(
+                        OHLCV.source == "twelve",
+                        OHLCV.timeframe == "1min",
+                        OHLCV.timestamp >= row.opened_at,
+                    )
+                    .all()
+                )
+                if bars:
+                    max_high = max(b.high for b in bars)
+                    min_low = min(b.low for b in bars)
+                    entry_snap = row.entry_snapshot or {}
+                    entry_price = entry_snap.get("price")
+                    if entry_price is not None:
+                        if row.side == "LONG":
+                            snap["max_favorable_excursion_usd"] = round(max_high - entry_price, 3)
+                            snap["max_adverse_excursion_usd"] = round(entry_price - min_low, 3)
+                        elif row.side == "SHORT":
+                            snap["max_favorable_excursion_usd"] = round(entry_price - min_low, 3)
+                            snap["max_adverse_excursion_usd"] = round(max_high - entry_price, 3)
+    except Exception:
+        logger.exception("attach_exit_snapshot: MFE/MAE computation failed")
+
     try:
         with SessionLocal() as session:
             row = session.query(Campaign).filter(Campaign.id == campaign_id).first()
