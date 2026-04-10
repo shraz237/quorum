@@ -60,3 +60,5 @@ docs/superpowers/
 
 # Private docs — never push to public repo
 README_PL.md
+Asystent_Tradingowy_PL.docx
+build_docx.py
