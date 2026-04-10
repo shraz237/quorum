@@ -127,6 +127,46 @@ const PositionsTab: React.FC = () => {
       </div>
       <CampaignsPanel persona="main" />
 
+      {/* Persona comparison strip */}
+      {mainAccount && scalperAccount && (
+        <div className="my-4 grid grid-cols-2 md:grid-cols-4 gap-px bg-gray-800 rounded-lg overflow-hidden">
+          <div className="bg-gray-900 px-3 py-2 text-center">
+            <div className="text-[9px] text-gray-500 uppercase">Main Realized P/L</div>
+            <div className={`text-lg font-bold tabular-nums ${mainAccount.realized_pnl_total >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+              {mainAccount.realized_pnl_total >= 0 ? "+" : ""}${fmt(mainAccount.realized_pnl_total)}
+            </div>
+          </div>
+          <div className="bg-gray-900 px-3 py-2 text-center">
+            <div className="text-[9px] text-gray-500 uppercase">Scalper Realized P/L</div>
+            <div className={`text-lg font-bold tabular-nums ${scalperAccount.realized_pnl_total >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+              {scalperAccount.realized_pnl_total >= 0 ? "+" : ""}${fmt(scalperAccount.realized_pnl_total)}
+            </div>
+          </div>
+          <div className="bg-gray-900 px-3 py-2 text-center">
+            <div className="text-[9px] text-gray-500 uppercase">Main Drawdown</div>
+            <div className={`text-lg font-bold tabular-nums ${
+              mainAccount.account_drawdown_pct <= -30 ? "text-red-400"
+              : mainAccount.account_drawdown_pct <= -15 ? "text-amber-400"
+              : mainAccount.account_drawdown_pct >= 5 ? "text-emerald-300"
+              : "text-gray-300"
+            }`}>
+              {mainAccount.account_drawdown_pct >= 0 ? "+" : ""}{mainAccount.account_drawdown_pct.toFixed(1)}%
+            </div>
+          </div>
+          <div className="bg-gray-900 px-3 py-2 text-center">
+            <div className="text-[9px] text-gray-500 uppercase">Scalper Drawdown</div>
+            <div className={`text-lg font-bold tabular-nums ${
+              scalperAccount.account_drawdown_pct <= -30 ? "text-red-400"
+              : scalperAccount.account_drawdown_pct <= -15 ? "text-amber-400"
+              : scalperAccount.account_drawdown_pct >= 5 ? "text-emerald-300"
+              : "text-gray-300"
+            }`}>
+              {scalperAccount.account_drawdown_pct >= 0 ? "+" : ""}{scalperAccount.account_drawdown_pct.toFixed(1)}%
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Divider */}
       <div className="my-6 flex items-center gap-3">
         <div className="flex-1 border-t border-gray-800" />

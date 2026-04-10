@@ -52,6 +52,36 @@ const Card: React.FC<{ title: string; subtitle?: string; children: React.ReactNo
 // 1. Trade Journal
 // ---------------------------------------------------------------------------
 
+interface SnapshotData {
+  price?: number;
+  scores?: Record<string, number | null>;
+  ai_recommendation?: {
+    action?: string;
+    confidence?: number;
+    analysis_text?: string;
+    base_scenario?: string;
+    alt_scenario?: string;
+    unified_score?: number;
+    opus_override_score?: number;
+  };
+  recent_news?: Array<{
+    ts: string;
+    summary: string;
+    sentiment?: string;
+    score?: number;
+  }>;
+  exit_context?: {
+    total_friction_usd?: number;
+    total_realized_pnl?: number;
+    close_trigger?: string;
+    close_notes?: string;
+  };
+  max_favorable_excursion_usd?: number;
+  max_adverse_excursion_usd?: number;
+  friction_config?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 interface JournalEntry {
   id: number;
   side: "LONG" | "SHORT";
@@ -62,6 +92,8 @@ interface JournalEntry {
   realized_pnl: number | null;
   pnl_pct_of_entry_margin: number | null;
   notes: string | null;
+  entry_snapshot: SnapshotData | null;
+  exit_snapshot: SnapshotData | null;
 }
 
 interface JournalStats {
@@ -83,6 +115,85 @@ interface JournalResponse {
   entries: JournalEntry[];
   stats: JournalStats;
 }
+
+const SnapshotDetail: React.FC<{ label: string; snap: SnapshotData | null }> = ({ label, snap }) => {
+  if (!snap) return <div className="text-[9px] text-gray-600 italic">No {label.toLowerCase()} snapshot captured.</div>;
+
+  const scores = snap.scores;
+  const ai = snap.ai_recommendation;
+  const news = snap.recent_news;
+  const exitCtx = snap.exit_context;
+
+  return (
+    <div className="space-y-1.5 text-[10px]">
+      {/* Price + Scores */}
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono">
+        {snap.price != null && (
+          <span className="text-gray-400">Price: <span className="text-white">${snap.price.toFixed(3)}</span></span>
+        )}
+        {scores && Object.entries(scores).map(([k, v]) => (
+          <span key={k} className="text-gray-500">
+            {k}: <span className={v != null && v >= 60 ? "text-green-400" : v != null && v <= 40 ? "text-red-400" : "text-gray-300"}>
+              {v != null ? v.toFixed(1) : "—"}
+            </span>
+          </span>
+        ))}
+      </div>
+
+      {/* AI Recommendation */}
+      {ai && (
+        <div className="bg-gray-800/40 rounded p-1.5">
+          <div className="text-[9px] text-gray-500 uppercase mb-0.5">AI Recommendation</div>
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[9px] mb-1">
+            {ai.action && <span className={ai.action === "LONG" ? "text-green-400 font-bold" : ai.action === "SHORT" ? "text-red-400 font-bold" : "text-gray-300"}>{ai.action}</span>}
+            {ai.confidence != null && <span className="text-gray-400">conf: {ai.confidence}%</span>}
+            {ai.unified_score != null && <span className="text-gray-400">unified: {ai.unified_score.toFixed(1)}</span>}
+            {ai.opus_override_score != null && <span className="text-gray-400">opus: {ai.opus_override_score.toFixed(1)}</span>}
+          </div>
+          {ai.analysis_text && (
+            <div className="text-gray-400 text-[9px] line-clamp-4 whitespace-pre-wrap">{ai.analysis_text.slice(0, 500)}</div>
+          )}
+          {ai.base_scenario && (
+            <div className="text-[9px] mt-0.5"><span className="text-gray-500">Base: </span><span className="text-gray-400">{ai.base_scenario}</span></div>
+          )}
+          {ai.alt_scenario && (
+            <div className="text-[9px]"><span className="text-gray-500">Alt: </span><span className="text-gray-400">{ai.alt_scenario}</span></div>
+          )}
+        </div>
+      )}
+
+      {/* News headlines */}
+      {news && news.length > 0 && (
+        <div>
+          <div className="text-[9px] text-gray-500 uppercase">Recent News</div>
+          {news.map((n, i) => (
+            <div key={i} className="text-[9px] text-gray-400 truncate">
+              <span className={n.sentiment === "bearish" ? "text-red-400" : n.sentiment === "bullish" ? "text-green-400" : "text-gray-500"}>
+                [{n.sentiment || "neutral"}]
+              </span>{" "}
+              {n.summary}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Friction + MFE/MAE (exit only) */}
+      {(exitCtx?.total_friction_usd != null || snap.max_favorable_excursion_usd != null) && (
+        <div className="flex flex-wrap gap-x-4 gap-y-0.5 font-mono text-[9px]">
+          {exitCtx?.total_friction_usd != null && (
+            <span className="text-gray-500">Friction: <span className="text-amber-300">${exitCtx.total_friction_usd.toFixed(2)}</span></span>
+          )}
+          {snap.max_favorable_excursion_usd != null && (
+            <span className="text-gray-500">MFE: <span className="text-green-400">+${snap.max_favorable_excursion_usd.toFixed(3)}</span></span>
+          )}
+          {snap.max_adverse_excursion_usd != null && (
+            <span className="text-gray-500">MAE: <span className="text-red-400">-${snap.max_adverse_excursion_usd.toFixed(3)}</span></span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const TradeJournalCard: React.FC = () => {
   const { data } = useApi<JournalResponse>("/api/trade-journal?limit=50", { pollInterval: 60_000 });
@@ -145,21 +256,42 @@ const TradeJournalCard: React.FC = () => {
 
           {/* Entry list */}
           <div className="border-t border-gray-800 pt-2 mt-1">
-            <div className="max-h-48 overflow-y-auto flex flex-col gap-0.5">
+            <div className="max-h-72 overflow-y-auto flex flex-col gap-0.5">
               {entries.map((e) => (
-                <div key={e.id} className="text-[10px] flex items-center gap-2 hover:bg-gray-800/30 rounded px-1 py-0.5">
-                  <span className={`font-bold w-12 ${e.side === "SHORT" ? "text-red-400" : "text-green-400"}`}>
-                    {e.side}
-                  </span>
-                  <span className="text-gray-500 w-10">#{e.id}</span>
-                  <span className="text-gray-400 w-24 truncate">{fmtDateTime(e.closed_at)}</span>
-                  <span className={`w-20 text-right font-semibold ${pnlColor(e.realized_pnl)}`}>
-                    {signedUsd(e.realized_pnl)}
-                  </span>
-                  <span className={`w-14 text-right text-[9px] ${pnlColor(e.pnl_pct_of_entry_margin)}`}>
-                    {e.pnl_pct_of_entry_margin != null ? `${e.pnl_pct_of_entry_margin > 0 ? "+" : ""}${e.pnl_pct_of_entry_margin.toFixed(1)}%` : ""}
-                  </span>
-                </div>
+                <details key={e.id} className="group rounded hover:bg-gray-800/20">
+                  <summary className="text-[10px] flex items-center gap-2 px-1 py-0.5 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                    <span className="text-gray-600 group-open:rotate-90 transition-transform text-[8px]">&#9654;</span>
+                    <span className={`font-bold w-12 ${e.side === "SHORT" ? "text-red-400" : "text-green-400"}`}>
+                      {e.side}
+                    </span>
+                    <span className="text-gray-500 w-10">#{e.id}</span>
+                    <span className="text-gray-400 w-24 truncate">{fmtDateTime(e.closed_at)}</span>
+                    <span className={`w-20 text-right font-semibold ${pnlColor(e.realized_pnl)}`}>
+                      {signedUsd(e.realized_pnl)}
+                    </span>
+                    <span className={`w-14 text-right text-[9px] ${pnlColor(e.pnl_pct_of_entry_margin)}`}>
+                      {e.pnl_pct_of_entry_margin != null ? `${e.pnl_pct_of_entry_margin > 0 ? "+" : ""}${e.pnl_pct_of_entry_margin.toFixed(1)}%` : ""}
+                    </span>
+                  </summary>
+                  <div className="px-2 pb-2 pt-1 space-y-2 border-l-2 border-gray-800 ml-2">
+                    <details className="group/entry">
+                      <summary className="text-[9px] text-gray-500 uppercase cursor-pointer hover:text-gray-400">
+                        Entry Reasoning
+                      </summary>
+                      <div className="mt-1 pl-2">
+                        <SnapshotDetail label="Entry" snap={e.entry_snapshot} />
+                      </div>
+                    </details>
+                    <details className="group/exit">
+                      <summary className="text-[9px] text-gray-500 uppercase cursor-pointer hover:text-gray-400">
+                        Exit Reasoning
+                      </summary>
+                      <div className="mt-1 pl-2">
+                        <SnapshotDetail label="Exit" snap={e.exit_snapshot} />
+                      </div>
+                    </details>
+                  </div>
+                </details>
               ))}
             </div>
           </div>

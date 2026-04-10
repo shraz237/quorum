@@ -857,8 +857,9 @@ def close_campaign(campaign_id: int, status: str, notes: str | None = None) -> d
         return None
 
     with SessionLocal() as session:
-        campaign = session.query(Campaign).filter(Campaign.id == campaign_id).first()
+        campaign = session.query(Campaign).filter(Campaign.id == campaign_id).with_for_update(skip_locked=True).first()
         if campaign is None:
+            logger.info("close_campaign #%s: skipped (row locked or missing)", campaign_id)
             return None
         campaign_persona = campaign.persona or "main"
 
