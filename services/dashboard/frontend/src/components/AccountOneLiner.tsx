@@ -26,7 +26,8 @@ const MiniAccount: React.FC<{ label: string; data: Account; color: string }> = (
   data,
   color,
 }) => {
-  const pnl = data.unrealised_pnl;
+  const pnl = data.unrealised_pnl ?? 0;
+  const eq = data.equity ?? 0;
   const pnlColor = pnl >= 0 ? "text-emerald-300" : "text-red-300";
   const pnlSign = pnl >= 0 ? "+" : "";
 
@@ -34,7 +35,7 @@ const MiniAccount: React.FC<{ label: string; data: Account; color: string }> = (
     <span className="flex items-center gap-1">
       <span className={`text-[8px] uppercase tracking-wider ${color}`}>{label}</span>
       <span className="font-bold tabular-nums text-gray-100 text-[11px]">
-        ${(data.equity / 1000).toFixed(1)}k
+        ${(eq / 1000).toFixed(1)}k
       </span>
       <span className={`tabular-nums text-[10px] ${pnlColor}`}>
         {pnlSign}${Math.round(pnl)}
@@ -60,10 +61,10 @@ const AccountOneLiner: React.FC<Props> = ({ onClick }) => {
   }
 
   const mainTitle = main
-    ? `Main: eq $${main.equity.toFixed(0)} · dd ${main.account_drawdown_pct.toFixed(1)}% · ${main.open_campaigns} open`
+    ? `Main: eq $${(main.equity ?? 0).toFixed(0)} · dd ${(main.account_drawdown_pct ?? 0).toFixed(1)}% · ${main.open_campaigns ?? 0} open`
     : "";
   const scalperTitle = scalper
-    ? `Scalper: eq $${scalper.equity.toFixed(0)} · dd ${scalper.account_drawdown_pct.toFixed(1)}% · ${scalper.open_campaigns} open`
+    ? `Scalper: eq $${(scalper.equity ?? 0).toFixed(0)} · dd ${(scalper.account_drawdown_pct ?? 0).toFixed(1)}% · ${scalper.open_campaigns ?? 0} open`
     : "";
 
   return (

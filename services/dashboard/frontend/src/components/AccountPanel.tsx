@@ -104,16 +104,14 @@ const AccountPanel: React.FC = () => {
 
   if (!data) return null;
 
-  const equityDelta = data.equity - data.starting_balance;
-  const equityDeltaPct =
-    data.starting_balance !== 0
-      ? (equityDelta / data.starting_balance) * 100
-      : 0;
+  const equity = data.equity ?? 0;
+  const startBal = data.starting_balance ?? 50000;
+  const equityDelta = equity - startBal;
+  const equityDeltaPct = startBal !== 0 ? (equityDelta / startBal) * 100 : 0;
 
   // Distance to the -50% account hard stop, as a bar.
-  // fillPct = 0 when we're at zero drawdown, 100 when we hit the hard stop.
   const hardStopPct = Math.abs(data.account_hard_stop_pct || 50);
-  const ddPct = data.account_drawdown_pct;
+  const ddPct = data.account_drawdown_pct ?? 0;
   const hardStopFill =
     ddPct >= 0 ? 0 : Math.min(100, (Math.abs(ddPct) / hardStopPct) * 100);
   const hardStopColor =
