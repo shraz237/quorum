@@ -1384,6 +1384,114 @@ def _fire_status_pings(
 
 
 # ---------------------------------------------------------------------------
+# Urgent entry — open a campaign without waiting for the analyzer
+# ---------------------------------------------------------------------------
+
+
+def _maybe_urgent_entry() -> None:
+    """When no campaigns are open and Opus wants to trade with high
+    conviction, trigger the entry immediately instead of waiting for
+    the analyzer's throttled score cycle (which can be 8+ min).
+
+    Conditions (ALL must be true):
+      - No open main campaigns
+      - Latest AIRecommendation action is BUY or SELL
+      - Recommendation is fresh (< 30 min old)
+      - Confidence ≥ 0.60
+      - Market is open
+      - Cooldown on urgent entries (max 1 per 15 min to prevent spam)
+
+    When fired, it calls _handle_campaign_signal from main.py which
+    evaluates all entry gates (range bias, tech score with opus override,
+    loss cooldown, staleness). If the gates block it, nothing happens.
+    """
+    # Check market hours
+    try:
+        from shared.market_hours import is_market_open
+        if not is_market_open():
+            return
+    except Exception:
+        return
+
+    # Check cooldown — max 1 urgent entry per 15 min
+    URGENT_COOLDOWN_KEY = "heartbeat:last_urgent_entry"
+    try:
+        r = get_redis()
+        last_raw = _redis_str(r.get(URGENT_COOLDOWN_KEY))
+        if last_raw is not None:
+            try:
+                if (time.time() - float(last_raw)) < 15 * 60:
+                    return  # still cooling down
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        return
+
+    # Get latest recommendation
+    try:
+        from shared.models.signals import AIRecommendation
+        with SessionLocal() as session:
+            rec = (
+                session.query(AIRecommendation)
+                .order_by(AIRecommendation.timestamp.desc())
+                .first()
+            )
+            if rec is None:
+                return
+
+            # Must be fresh (< 30 min)
+            if rec.timestamp is not None:
+                age_min = (datetime.now(tz=timezone.utc) - rec.timestamp).total_seconds() / 60
+                if age_min > 30:
+                    return
+
+            action = (rec.action or "").upper()
+            if action not in ("BUY", "SELL"):
+                return
+
+            conf = rec.confidence or 0
+            if conf < 0.60:
+                return
+
+            # Build the rec dict that _handle_campaign_signal expects
+            rec_dict = {
+                "action": action,
+                "confidence": conf,
+                "opus_override_score": rec.opus_override_score,
+                "unified_score": rec.unified_score,
+                "take_profit": rec.take_profit,
+                "stop_loss": rec.stop_loss,
+                "entry_price": rec.entry_price,
+                "analysis_text": rec.analysis_text,
+            }
+    except Exception:
+        logger.exception("Heartbeat urgent entry: failed to read recommendation")
+        return
+
+    # Map action to side
+    side = "LONG" if action == "BUY" else "SHORT"
+
+    logger.warning(
+        "Heartbeat URGENT ENTRY: Opus says %s (conf=%.2f) with no open campaigns — "
+        "triggering immediately instead of waiting for analyzer",
+        action, conf,
+    )
+
+    # Mark cooldown BEFORE attempting so we don't spam if it fails
+    try:
+        get_redis().set(URGENT_COOLDOWN_KEY, str(time.time()))
+    except Exception:
+        pass
+
+    # Import and call the signal handler from main.py
+    try:
+        from main import _handle_campaign_signal
+        _handle_campaign_signal(action, conf, rec_dict)
+    except Exception:
+        logger.exception("Heartbeat urgent entry: _handle_campaign_signal failed")
+
+
+# ---------------------------------------------------------------------------
 # One full heartbeat tick
 # ---------------------------------------------------------------------------
 
@@ -1401,7 +1509,16 @@ def run_tick() -> dict:
 
     open_ids = _get_open_campaign_ids()
     if not open_ids:
-        logger.info("Heartbeat: no open campaigns, skipping tick")
+        # --- URGENT ENTRY CHECK ---
+        # No open campaigns. Check if the latest Opus recommendation
+        # wants to enter AND all gates pass — if so, trigger it NOW
+        # instead of waiting for the analyzer's throttled score cycle.
+        # This catches the scenario where Opus is screaming BUY at 72%
+        # on breaking Hormuz news but the analyzer won't fire for 8 min.
+        try:
+            _maybe_urgent_entry()
+        except Exception:
+            logger.exception("Heartbeat urgent entry check failed")
         return {"status": "flat", "ran_at": ran_at.isoformat()}
 
     if not _acquire_lock():
