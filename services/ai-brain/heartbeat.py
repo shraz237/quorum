@@ -815,11 +815,34 @@ def _execute_decision(
                 return
             new_pos_id = add_dca_layer(campaign_id, current_price)
             if new_pos_id is not None:
-                logger.info("Heartbeat DCA #%s: added layer — %s", campaign_id, reason[:120])
+                # Fetch updated campaign state to show full position info
+                updated = compute_campaign_state(campaign_id, current_price)
+                layers_now = (updated or {}).get("layers_used", 0)
+                max_lay = (updated or {}).get("max_layers", 25)
+                total_margin = (updated or {}).get("total_margin", 0)
+                total_lots = (updated or {}).get("total_lots", 0)
+                total_nominal = (updated or {}).get("total_nominal", 0)
+                avg_entry = (updated or {}).get("avg_entry_price", 0)
+                unrealised = (updated or {}).get("unrealised_pnl", 0)
+                unrealised_pct = (updated or {}).get("unrealised_pnl_pct", 0)
+
+                logger.info("Heartbeat DCA #%s: layer %d added @ %.3f — %s", campaign_id, layers_now, current_price, reason[:120])
                 _record_run(ran_at, campaign_id, "add_dca", reason, opus_raw, True, None)
                 _publish_heartbeat_action(
                     campaign_id, "add_dca", reason,
-                    extra={"side": camp_ctx.get("side"), "price": current_price},
+                    extra={
+                        "side": camp_ctx.get("side"),
+                        "price": current_price,
+                        "avg_entry": avg_entry,
+                        "layers": layers_now,
+                        "max_layers": max_lay,
+                        "total_margin": total_margin,
+                        "total_lots": total_lots,
+                        "total_nominal": total_nominal,
+                        "leverage": DEFAULT_LEVERAGE,
+                        "unrealized_pnl_usd": unrealised,
+                        "unrealized_pnl_pct": unrealised_pct,
+                    },
                 )
             else:
                 logger.info("Heartbeat DCA #%s: add_dca_layer returned None (layers exhausted or equity cap)", campaign_id)

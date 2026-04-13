@@ -600,6 +600,8 @@ def _format_heartbeat_action(evt: dict) -> str:
         title = "Heartbeat CLOSED campaign"
     elif action == "update_levels":
         title = "Heartbeat UPDATED levels"
+    elif action == "add_dca":
+        title = "Heartbeat DCA Layer Added"
     else:
         title = f"Heartbeat {action}"
 
@@ -640,6 +642,35 @@ def _format_heartbeat_action(evt: dict) -> str:
                 pct_f = float(pnl_pct)
                 sign = "+" if pnl_f >= 0 else ""
                 lines.append(f"Unrealised:  {sign}${pnl_f:.0f}  ({sign}{pct_f:.2f}%)")
+            except (TypeError, ValueError):
+                pass
+
+    # DCA-specific: show entry price, new avg, layers, position total
+    if action == "add_dca":
+        price = evt.get("price")
+        avg_entry = evt.get("avg_entry")
+        layers = evt.get("layers")
+        max_layers = evt.get("max_layers")
+        pnl_usd = evt.get("unrealized_pnl_usd")
+        pnl_pct = evt.get("unrealized_pnl_pct")
+        if price is not None:
+            try:
+                lines.append(f"Layer entry: `${float(price):.3f}`")
+            except (TypeError, ValueError):
+                pass
+        if avg_entry is not None:
+            try:
+                lines.append(f"Avg entry:   `${float(avg_entry):.3f}`")
+            except (TypeError, ValueError):
+                pass
+        if layers is not None:
+            lines.append(f"Layers:      {layers}/{max_layers or '?'}")
+        if pnl_usd is not None and pnl_pct is not None:
+            try:
+                pnl_f = float(pnl_usd)
+                pct_f = float(pnl_pct)
+                sign = "+" if pnl_f >= 0 else ""
+                lines.append(f"Position P/L: {sign}${pnl_f:.0f}  ({sign}{pct_f:.2f}%)")
             except (TypeError, ValueError):
                 pass
 
