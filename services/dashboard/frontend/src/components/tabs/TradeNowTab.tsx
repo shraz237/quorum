@@ -11,6 +11,7 @@
 import React from "react";
 import useApi from "../../hooks/useApi";
 import SynthesisPanel from "../SynthesisPanel";
+import MainBrainPanel from "../MainBrainPanel";
 import ScalpBrainPanel from "../ScalpBrainPanel";
 import ScalpingRangePanel from "../ScalpingRangePanel";
 import PriceChart, { OHLCVBar, PositionOverlay, SignalOverlay, LiveTick } from "../PriceChart";
@@ -61,6 +62,7 @@ const TradeNowTab: React.FC<Props> = ({
   return (
     <>
       <SynthesisPanel />
+      <MainBrainPanel />
       <ScalpBrainPanel />
       <ScalpingRangePanel />
       <section className="mb-6">

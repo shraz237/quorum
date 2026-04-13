@@ -1014,6 +1014,21 @@ def get_liquidations(
 
 
 # ---------------------------------------------------------------------------
+# Main Trader Brain
+# ---------------------------------------------------------------------------
+
+@app.get("/api/main-brain")
+def get_main_brain_endpoint() -> dict[str, Any]:
+    """What is the main trader thinking right now? Verdict + gates + reasoning."""
+    try:
+        from plugin_main_brain import get_main_brain
+        return {"data": get_main_brain()}
+    except Exception as exc:
+        logger.exception("main-brain endpoint failed")
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # Market Hours
 # ---------------------------------------------------------------------------
 
