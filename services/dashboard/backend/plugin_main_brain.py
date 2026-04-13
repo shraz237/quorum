@@ -86,7 +86,7 @@ def _get_latest_scores() -> dict | None:
         return None
 
 
-def _get_entry_gates(action: str | None, scores: dict | None) -> list[dict]:
+def _get_entry_gates(action: str | None, scores: dict | None, recommendation: dict | None = None) -> list[dict]:
     """Evaluate every entry gate and return their status."""
     gates = []
 
@@ -127,24 +127,37 @@ def _get_entry_gates(action: str | None, scores: dict | None) -> list[dict]:
     except Exception:
         gates.append({"name": "Range bias", "ok": True, "detail": "check failed"})
 
-    # Gate 2: Technical score
+    # Gate 2: Technical score (with Opus override)
     tech = (scores or {}).get("technical")
+    rec_data = _get_latest_recommendation() if recommendation is None else recommendation
+    opus_conf = (rec_data or {}).get("confidence") or 0
+    opus_override_score = (rec_data or {}).get("opus_override_score") or 0
+    opus_can_override = opus_conf >= 0.70 and abs(opus_override_score) >= 40
+
     if tech is not None:
         min_tech = 5.0
         if action in ("BUY", "LONG"):
-            ok = tech >= min_tech
-            gates.append({
-                "name": "Tech score",
-                "ok": ok,
-                "detail": f"tech={tech:.1f}" + (f" · BLOCKED (< {min_tech})" if not ok else " · OK for LONG"),
-            })
+            raw_ok = tech >= min_tech
+            ok = raw_ok or opus_can_override
+            detail = f"tech={tech:.1f}"
+            if raw_ok:
+                detail += " · OK for LONG"
+            elif opus_can_override:
+                detail += f" · would block but OPUS OVERRIDE ({opus_conf:.0%} conf, override={opus_override_score:.0f})"
+            else:
+                detail += f" · BLOCKED (< {min_tech})"
+            gates.append({"name": "Tech score", "ok": ok, "detail": detail})
         elif action in ("SELL", "SHORT"):
-            ok = tech <= -min_tech
-            gates.append({
-                "name": "Tech score",
-                "ok": ok,
-                "detail": f"tech={tech:.1f}" + (f" · BLOCKED (> {-min_tech})" if not ok else " · OK for SHORT"),
-            })
+            raw_ok = tech <= -min_tech
+            ok = raw_ok or opus_can_override
+            detail = f"tech={tech:.1f}"
+            if raw_ok:
+                detail += " · OK for SHORT"
+            elif opus_can_override:
+                detail += f" · would block but OPUS OVERRIDE ({opus_conf:.0%} conf, override={opus_override_score:.0f})"
+            else:
+                detail += f" · BLOCKED (> {-min_tech})"
+            gates.append({"name": "Tech score", "ok": ok, "detail": detail})
         else:
             gates.append({"name": "Tech score", "ok": True, "detail": f"tech={tech:.1f} · no side to check"})
     else:
@@ -213,7 +226,7 @@ def _compute_main_brain() -> dict:
     confidence = (recommendation or {}).get("confidence")
 
     # What would the main trader do right now?
-    gates = _get_entry_gates(action, scores)
+    gates = _get_entry_gates(action, scores, recommendation)
     gates_passed = sum(1 for g in gates if g["ok"])
     gates_total = len(gates)
     all_gates_pass = gates_passed == gates_total

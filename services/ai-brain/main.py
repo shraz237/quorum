@@ -217,8 +217,20 @@ def _handle_campaign_signal(new_side: str, conf: float, rec: dict) -> None:
     # --- GATE 2: TECHNICAL SCORE ALIGNMENT ---
     # Never go LONG when technicals are bearish or SHORT when bullish.
     # Root cause of losing campaigns #7 (tech=-4.5), #10 (tech=-1.7).
+    #
+    # OPUS OVERRIDE: when Opus confidence ≥ 70% AND opus_override_score ≥ 40,
+    # bypass the tech gate entirely. This lets Opus punch through on
+    # exceptional conviction (e.g. 80+ facilities destroyed, Hormuz
+    # compromised) where the chart hasn't caught up to the news yet.
+    # Only fires on extreme events, not marginal calls.
     MIN_TECH_SCORE_FOR_ENTRY = 5.0
+    OPUS_OVERRIDE_CONFIDENCE = 0.70
+    OPUS_OVERRIDE_SCORE = 40
     try:
+        opus_conf = rec.get("confidence") or 0
+        opus_override = rec.get("opus_override_score") or 0
+        opus_overriding = (opus_conf >= OPUS_OVERRIDE_CONFIDENCE and abs(opus_override) >= OPUS_OVERRIDE_SCORE)
+
         from shared.models.base import SessionLocal as _SL
         from shared.models.signals import AnalysisScore as _AS
         with _SL() as _sess:
@@ -232,6 +244,27 @@ def _handle_campaign_signal(new_side: str, conf: float, rec: dict) -> None:
                 elif new_side == "SELL" and tech > -MIN_TECH_SCORE_FOR_ENTRY:
                     blocked = True
                     block_reason = f"Tech score BLOCKED SELL: technical={tech:.1f} > {-MIN_TECH_SCORE_FOR_ENTRY} minimum"
+                if blocked and opus_overriding:
+                    logger.warning(
+                        "Tech gate would block but OPUS OVERRIDE active (conf=%.2f, override_score=%.0f) — ALLOWING %s",
+                        opus_conf, opus_override, new_side,
+                    )
+                    try:
+                        publish(STREAM_POSITION, {
+                            "type": "heartbeat_action",
+                            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                            "campaign_id": 0,
+                            "action": "opus_override",
+                            "side": new_side,
+                            "reason": (
+                                f"OPUS OVERRIDE: tech={tech:.1f} would block {new_side} but "
+                                f"Opus confidence {opus_conf:.0%} + override score {opus_override:.0f} "
+                                f"punched through the gate. Exceptional conviction event."
+                            ),
+                        })
+                    except Exception:
+                        pass
+                    blocked = False  # allow through
                 if blocked:
                     logger.warning(block_reason)
                     try:
