@@ -143,11 +143,16 @@ MANAGE_CAMPAIGNS_TOOL = {
                         },
                         "action": {
                             "type": "string",
-                            "enum": ["hold", "close", "update_levels"],
+                            "enum": ["hold", "close", "update_levels", "add_dca"],
                             "description": (
                                 "hold = no action, just log reasoning. "
                                 "close = market-close all layers. "
-                                "update_levels = adjust TP and/or SL in place."
+                                "update_levels = adjust TP and/or SL in place. "
+                                "add_dca = add the next DCA layer at current price "
+                                "to build the position. Use when thesis is intact and "
+                                "position is small relative to conviction. The 25-layer "
+                                "schedule starts at $300 and grows — use add_dca liberally "
+                                "when you believe in the thesis."
                             ),
                         },
                         "reason": {
@@ -240,6 +245,12 @@ Your toolbox per campaign:
   • hold            — do nothing, just log your reasoning
   • close           — market-close all DCA layers in this campaign
   • update_levels   — change take_profit and/or stop_loss in place
+  • add_dca         — add the next DCA layer at current price to BUILD
+                      the position. The 25-layer schedule starts at $300
+                      and grows. Use add_dca LIBERALLY when the thesis is
+                      intact and the position is small. A 1-layer $300
+                      campaign on a strong thesis is UNDER-SIZED — keep
+                      adding layers every few ticks to build conviction.
 
 You must return EXACTLY ONE decision per open campaign in the `decisions`
 array. Do not forget any campaign. Do not return two decisions for the
@@ -768,7 +779,7 @@ def _execute_decision(
     action = decision.get("action")
     reason = decision.get("reason") or ""
 
-    if not isinstance(campaign_id, int) or action not in ("hold", "close", "update_levels"):
+    if not isinstance(campaign_id, int) or action not in ("hold", "close", "update_levels", "add_dca"):
         logger.error("Malformed heartbeat decision: %r", decision)
         _record_run(ran_at, campaign_id, "error", f"malformed: {decision!r}", opus_raw, False, None)
         return
@@ -792,6 +803,30 @@ def _execute_decision(
     if action == "hold":
         logger.info("Heartbeat hold #%s: %s", campaign_id, reason[:120])
         _record_run(ran_at, campaign_id, "hold", reason, opus_raw, True, None)
+        return
+
+    # --- ADD_DCA: scale into the position ---
+    if action == "add_dca":
+        try:
+            from shared.position_manager import add_dca_layer
+            current_price = get_current_price()
+            if current_price is None:
+                _record_run(ran_at, campaign_id, "add_dca", f"FAILED (no price): {reason}", opus_raw, False, None)
+                return
+            new_pos_id = add_dca_layer(campaign_id, current_price)
+            if new_pos_id is not None:
+                logger.info("Heartbeat DCA #%s: added layer — %s", campaign_id, reason[:120])
+                _record_run(ran_at, campaign_id, "add_dca", reason, opus_raw, True, None)
+                _publish_heartbeat_action(
+                    campaign_id, "add_dca", reason,
+                    extra={"side": camp_ctx.get("side"), "price": current_price},
+                )
+            else:
+                logger.info("Heartbeat DCA #%s: add_dca_layer returned None (layers exhausted or equity cap)", campaign_id)
+                _record_run(ran_at, campaign_id, "add_dca", f"REJECTED (cap/exhausted): {reason}", opus_raw, False, None)
+        except Exception:
+            logger.exception("Heartbeat add_dca(#%s) raised", campaign_id)
+            _record_run(ran_at, campaign_id, "add_dca", f"FAILED: {reason}", opus_raw, False, None)
         return
 
     # --- CLOSE: guardrails then execute ---
@@ -1628,7 +1663,7 @@ def run_tick() -> dict:
         for dec in decisions:
             cid = dec.get("campaign_id")
             act = dec.get("action")
-            if isinstance(cid, int) and act in ("close", "update_levels"):
+            if isinstance(cid, int) and act in ("close", "update_levels", "add_dca"):
                 campaigns_with_actions.add(cid)
 
         # Fire status pings for HOLD campaigns that are due for one
