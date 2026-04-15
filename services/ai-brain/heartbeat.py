@@ -812,6 +812,28 @@ def _execute_decision(
 
     # --- ADD_DCA: scale into the position ---
     if action == "add_dca":
+        # Cooldown: max 1 DCA per 10 minutes from heartbeat.
+        # Without this, the hot window (30s ticks) causes Sonnet to
+        # add a layer every tick because it keeps seeing "undersized".
+        HEARTBEAT_DCA_COOLDOWN_KEY = f"heartbeat:last_dca:{campaign_id}"
+        try:
+            r = get_redis()
+            last_raw = _redis_str(r.get(HEARTBEAT_DCA_COOLDOWN_KEY))
+            if last_raw is not None:
+                try:
+                    age = time.time() - float(last_raw)
+                    if age < 10 * 60:  # 10 min cooldown
+                        logger.info(
+                            "Heartbeat DCA #%s COOLDOWN: last DCA %.0fs ago (need 600s)",
+                            campaign_id, age,
+                        )
+                        _record_run(ran_at, campaign_id, "hold", f"DCA cooldown ({age:.0f}s ago): {reason}", opus_raw, True, None)
+                        return
+                except (TypeError, ValueError):
+                    pass
+        except Exception:
+            pass
+
         try:
             from shared.position_manager import add_dca_layer
             current_price = get_current_price()
@@ -833,6 +855,10 @@ def _execute_decision(
 
                 logger.info("Heartbeat DCA #%s: layer %d added @ %.3f — %s", campaign_id, layers_now, current_price, reason[:120])
                 _record_run(ran_at, campaign_id, "add_dca", reason, opus_raw, True, None)
+                try:
+                    get_redis().set(HEARTBEAT_DCA_COOLDOWN_KEY, str(time.time()))
+                except Exception:
+                    pass
                 _publish_heartbeat_action(
                     campaign_id, "add_dca", reason,
                     extra={
