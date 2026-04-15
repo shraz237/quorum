@@ -60,10 +60,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MODEL = "claude-opus-4-6"
-# 5-minute default cadence — fast enough to catch intraday moves, cheap
-# enough with the hash gate active to stay well under budget. Tuned down
-# from 15 min after the user noted it felt too silent for active trading.
-HEARTBEAT_INTERVAL_MINUTES = int(os.environ.get("HEARTBEAT_INTERVAL_MINUTES", "5"))
+# 15-minute default cadence — balanced between responsiveness and token cost.
+# The hash gate skips Opus when nothing changed, and the hot window (30s)
+# activates automatically on campaign open/close for rapid monitoring.
+HEARTBEAT_INTERVAL_MINUTES = int(os.environ.get("HEARTBEAT_INTERVAL_MINUTES", "15"))
 HEARTBEAT_INTERVAL_SECONDS = HEARTBEAT_INTERVAL_MINUTES * 60
 
 # Kill-switch defaults
@@ -93,7 +93,7 @@ HASH_MAX_SKIP_SECONDS = 15 * 60
 # Status ping config — even when Opus is holding quietly, we want to
 # see the position state on Telegram regularly. Per-campaign cadence,
 # independent of whether Opus was called or the hash gate fired.
-STATUS_PING_INTERVAL_SECONDS = 5 * 60  # 5 min between status pings per campaign
+STATUS_PING_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours between status pings per campaign
 
 # Early-wake rules — conditions that force an IMMEDIATE status ping
 # regardless of the cooldown timer. These are "something just happened
