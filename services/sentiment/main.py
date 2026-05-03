@@ -56,7 +56,7 @@ def main() -> None:
     scheduler.add_job(
         safe_run,
         "interval",
-        minutes=5,
+        minutes=120,  # every 2 hours (was 5 min — saves ~280 Haiku calls/day)
         args=[marketfeed_collect, "marketfeed"],
         id="marketfeed",
         next_run_time=datetime.now(tz=timezone.utc),
@@ -64,7 +64,7 @@ def main() -> None:
 
     logger.info(
         "Sentiment scheduler starting — RSS 30min, Twitter 15min, "
-        "@marketfeed 5min (classify+digest combined)"
+        "@marketfeed 2h (classify+digest combined)"
     )
     scheduler.start()
 

@@ -67,7 +67,7 @@ MODEL = "claude-sonnet-4-6"
 # 15-minute default cadence — balanced between responsiveness and token cost.
 # The hash gate skips Opus when nothing changed, and the hot window (30s)
 # activates automatically on campaign open/close for rapid monitoring.
-HEARTBEAT_INTERVAL_MINUTES = int(os.environ.get("HEARTBEAT_INTERVAL_MINUTES", "30"))
+HEARTBEAT_INTERVAL_MINUTES = int(os.environ.get("HEARTBEAT_INTERVAL_MINUTES", "60"))
 HEARTBEAT_INTERVAL_SECONDS = HEARTBEAT_INTERVAL_MINUTES * 60
 
 # Kill-switch defaults

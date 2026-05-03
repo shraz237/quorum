@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _SOURCE_NAME = "telegram_marketfeed"
-_WINDOW_MINUTES = 5
+_WINDOW_MINUTES = 120  # 2 hours (matches scheduler interval)
 _STREAM = "knowledge.summary"
 
 _SUMMARY_SYSTEM = (

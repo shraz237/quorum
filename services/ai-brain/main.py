@@ -78,7 +78,7 @@ MIN_OPEN_CONFIDENCE = 0.55
 # --- Task 3: Score cache — skip LLM cycle when scores are flat ---
 _last_processed_scores: dict | None = None
 _last_processed_ts: float = 0
-_SCORE_CACHE_TTL_SECONDS = 1800  # 30 min
+_SCORE_CACHE_TTL_SECONDS = 3600  # 30 min
 _SCORE_DELTA_THRESHOLD = 5.0  # on -100..+100 scale
 
 
